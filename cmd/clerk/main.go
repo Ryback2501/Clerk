@@ -17,6 +17,8 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/Ryback2501/Clerk/internal/admin"
+	"github.com/Ryback2501/Clerk/internal/adminauth"
 	"github.com/Ryback2501/Clerk/internal/config"
 	"github.com/Ryback2501/Clerk/internal/keys"
 	"github.com/Ryback2501/Clerk/internal/oidc"
@@ -56,9 +58,18 @@ func run(logger *slog.Logger) error {
 
 	provider := oidc.New(cfg.Issuer, signer).WithLogger(logger)
 
+	// Admin authentication is not implemented yet, so the interface is open.
+	// Say so loudly rather than letting it be discovered.
+	logger.Warn(adminauth.Warning)
+	adminHandler, err := admin.New(db, adminauth.AllowAll{}, true)
+	if err != nil {
+		return fmt.Errorf("admin interface: %w", err)
+	}
+	adminHandler = adminHandler.WithLogger(logger)
+
 	srv := &http.Server{
 		Addr:              cfg.ListenAddr,
-		Handler:           newHandler(provider),
+		Handler:           newHandler(provider, adminHandler),
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 
@@ -90,12 +101,13 @@ func run(logger *slog.Logger) error {
 	return nil
 }
 
-// newHandler builds the HTTP routes. The admin UI is mounted here in a later
-// slice; it is kept separate from the provider so that an admin-side failure
-// cannot affect token issuance.
-func newHandler(provider *oidc.Provider) http.Handler {
+// newHandler builds the HTTP routes. The provider and the admin interface are
+// registered independently so that an admin-side failure cannot affect token
+// issuance.
+func newHandler(provider *oidc.Provider, adminHandler *admin.Handler) http.Handler {
 	mux := http.NewServeMux()
 	provider.Register(mux)
+	adminHandler.Register(mux)
 	mux.HandleFunc("GET /health", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
