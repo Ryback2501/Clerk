@@ -10,6 +10,10 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
+
+	jose "github.com/go-jose/go-jose/v4"
+	"github.com/go-jose/go-jose/v4/jwt"
 
 	"github.com/Ryback2501/Clerk/internal/keys"
 	"github.com/Ryback2501/Clerk/internal/store"
@@ -26,6 +30,38 @@ type flow struct {
 	basePath string
 	secret   string
 	signer   *keys.Signer
+	clock    *testClock
+	prov     *Provider
+}
+
+// testClock lets a test move time forward for both the provider and the store,
+// so expiry can be exercised without sleeping.
+type testClock struct{ at time.Time }
+
+func (c *testClock) Now() time.Time { return c.at }
+
+// advance moves the shared clock forward.
+func (f *flow) advance(d time.Duration) { f.clock.at = f.clock.at.Add(d) }
+
+// provider rebuilds a Provider matching this flow, for tests that need the
+// object rather than the mux.
+func (f *flow) provider() *Provider { return f.prov }
+
+// ctx returns a context for direct store calls in tests.
+func (f *flow) ctx() context.Context { return context.Background() }
+
+// subjectOf reads the sub claim out of a signed ID token.
+func subjectOf(t *testing.T, f *flow, idToken string) string {
+	t.Helper()
+	parsed, err := jwt.ParseSigned(idToken, []jose.SignatureAlgorithm{jose.RS256})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var claims jwt.Claims
+	if err := parsed.Claims(f.signer.Public(), &claims); err != nil {
+		t.Fatal(err)
+	}
+	return claims.Subject
 }
 
 const testRedirect = "https://app.example.com/cb"
@@ -41,7 +77,8 @@ func newFlowWith(t *testing.T, issuerURL string, configure func(*Options)) *flow
 	t.Helper()
 	dir := t.TempDir()
 
-	s, err := store.Open(filepath.Join(dir, "clerk.db"))
+	clock := &testClock{at: time.Now()}
+	s, err := store.Open(filepath.Join(dir, "clerk.db"), store.WithClock(clock.Now))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -56,7 +93,7 @@ func newFlowWith(t *testing.T, issuerURL string, configure func(*Options)) *flow
 		t.Fatal(err)
 	}
 
-	opts := Options{Issuer: issuer, Signer: signer, Store: s}
+	opts := Options{Issuer: issuer, Signer: signer, Store: s, Now: clock.Now}
 	if configure != nil {
 		configure(&opts)
 	}
@@ -78,7 +115,8 @@ func newFlowWith(t *testing.T, issuerURL string, configure func(*Options)) *flow
 	mux := http.NewServeMux()
 	p.Register(mux)
 	return &flow{
-		t: t, mux: mux, store: s, app: app, user: user,
+		t: t, mux: mux, store: s, app: app, user: user, clock: clock,
+		prov:     p,
 		jar:      map[string]string{},
 		basePath: strings.TrimRight(issuer.Path, "/"),
 		secret:   appSecret,
