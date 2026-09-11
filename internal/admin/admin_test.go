@@ -493,3 +493,11 @@ func TestStaticDirectoryIsNotBrowsable(t *testing.T) {
 		t.Error("the static directory returns a browsable index of its contents")
 	}
 }
+
+func newForm(method, path, body string) *http.Request {
+	req := httptest.NewRequest(method, path, strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	return req
+}
+
+func newRecorder() *httptest.ResponseRecorder { return httptest.NewRecorder() }

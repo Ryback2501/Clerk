@@ -64,7 +64,53 @@
 </form>
 
 <h2>Test users</h2>
-<p class="muted">Users are managed in a later step.</p>
+<p class="muted">
+  These are the identities the login page will offer for this application.
+  There are no passwords: signing in means picking one and pressing Login.
+</p>
+
+{{if .UserError}}<p role="alert"><strong>{{.UserError}}</strong></p>{{end}}
+
+{{if .Users}}
+<table>
+  <thead>
+    <tr>
+      <th scope="col">Name</th>
+      <th scope="col">Subject (<code>sub</code>)</th>
+      <th scope="col"></th>
+    </tr>
+  </thead>
+  <tbody>
+  {{range .Users}}
+    <tr>
+      <td>{{.Username}}</td>
+      <td><code class="value">{{.Sub}}</code></td>
+      <td style="width:1%">
+        <form method="post" action="/admin/applications/{{$.Application.ID}}/users/{{.ID}}/delete">
+          <input type="hidden" name="csrf_token" value="{{$.CSRFToken}}">
+          <button type="submit" class="secondary outline">Delete</button>
+        </form>
+      </td>
+    </tr>
+  {{end}}
+  </tbody>
+</table>
+{{else}}
+<p role="alert">
+  No test users yet. Authorization requests for this application will show an
+  error until you add at least one.
+</p>
+{{end}}
+
+<form method="post" action="/admin/applications/{{.Application.ID}}/users">
+  <input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
+  <label>
+    Add a test user
+    <input type="text" name="username" value="{{.UserForm}}" required placeholder="david">
+    <small>Unique within this application. The same name may be used in other applications — they are different identities.</small>
+  </label>
+  <button type="submit">Add user</button>
+</form>
 
 <h2>Danger zone</h2>
 <p><a href="/admin/applications/{{.Application.ID}}/delete" role="button" class="danger">Delete application</a></p>
