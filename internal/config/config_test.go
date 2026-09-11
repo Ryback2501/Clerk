@@ -116,7 +116,7 @@ func TestLoadRejectsBadInput(t *testing.T) {
 				"CLERK_ISSUER":   "http://localhost:8080",
 				"CLERK_CODE_TTL": "-5s",
 			},
-			wantSub: "must be positive",
+			wantSub: "must be at least 1s",
 		},
 	}
 
@@ -190,5 +190,29 @@ func TestAdminInsecureMustBeOptedInto(t *testing.T) {
 		"CLERK_ISSUER": base["CLERK_ISSUER"], "CLERK_ADMIN_INSECURE": "maybe",
 	})); err == nil {
 		t.Error("an unrecognised CLERK_ADMIN_INSECURE value was accepted")
+	}
+}
+
+// Token lifetimes are reported to clients in whole seconds (expires_in), so a
+// sub-second value truncates to zero and tells the client the token is already
+// expired. Reject it rather than issue something dead on arrival.
+func TestTokenLifetimesMustBeAtLeastOneSecond(t *testing.T) {
+	for _, key := range []string{"CLERK_CODE_TTL", "CLERK_ACCESS_TOKEN_TTL", "CLERK_ID_TOKEN_TTL"} {
+		t.Run(key, func(t *testing.T) {
+			_, err := Load(envMap(map[string]string{
+				"CLERK_ISSUER": "http://localhost:8080",
+				key:            "500ms",
+			}))
+			if err == nil {
+				t.Errorf("%s=500ms was accepted; it truncates to expires_in=0", key)
+			}
+
+			if _, err := Load(envMap(map[string]string{
+				"CLERK_ISSUER": "http://localhost:8080",
+				key:            "1s",
+			})); err != nil {
+				t.Errorf("%s=1s was rejected: %v", key, err)
+			}
+		})
 	}
 }

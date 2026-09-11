@@ -29,6 +29,9 @@ const (
 
 	// authCodeBytes is the entropy behind an authorization code.
 	authCodeBytes = 32
+
+	// accessTokenBytes is the entropy behind an access token.
+	accessTokenBytes = 32
 )
 
 // AuthRequest is a validated authorization request parked while the user picks
@@ -224,6 +227,86 @@ func (s *Store) ConsumeAuthCode(ctx context.Context, plain string) (*AuthCode, e
 	return &code, nil
 }
 
+// AccessToken is an issued bearer token, resolved back to the client and user
+// it was minted for.
+type AccessToken struct {
+	ApplicationID int64
+	UserID        int64
+	Scope         string
+	ExpiresAt     time.Time
+}
+
+// IssueAccessToken mints a token and returns the plaintext. Only its hash is
+// stored.
+//
+// authCode is the plaintext authorization code this token was issued for, so a
+// later replay of that code can revoke it. It may be empty for tokens that did
+// not come from a code exchange.
+func (s *Store) IssueAccessToken(ctx context.Context, appID, userID int64, scope, authCode string, ttl time.Duration) (string, error) {
+	plain, err := secret.Token(accessTokenBytes)
+	if err != nil {
+		return "", err
+	}
+
+	var codeHash any
+	if authCode != "" {
+		codeHash = secret.HashToken(authCode)
+	}
+
+	now := s.now()
+	if _, err := s.db.ExecContext(ctx,
+		`INSERT INTO access_tokens
+		   (token_hash, application_id, user_id, scope, auth_code_hash, expires_at, created_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		secret.HashToken(plain), appID, userID, scope, codeHash,
+		now.Add(ttl).Unix(), now.Unix()); err != nil {
+		return "", fmt.Errorf("insert access token: %w", err)
+	}
+	return plain, nil
+}
+
+// RevokeTokensIssuedForCode deletes every access token minted from the given
+// authorization code, and reports how many were removed.
+//
+// This is the response to a detected replay: the first redemption may have
+// been the attacker's, so what it produced must not stay valid.
+func (s *Store) RevokeTokensIssuedForCode(ctx context.Context, authCode string) (int64, error) {
+	res, err := s.db.ExecContext(ctx,
+		`DELETE FROM access_tokens WHERE auth_code_hash = ?`, secret.HashToken(authCode))
+	if err != nil {
+		return 0, fmt.Errorf("revoke tokens for authorization code: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return 0, fmt.Errorf("revoke tokens for authorization code: %w", err)
+	}
+	return n, nil
+}
+
+// LookupAccessToken resolves a bearer token. An expired one is reported as
+// absent: to a caller presenting it, the two are the same.
+func (s *Store) LookupAccessToken(ctx context.Context, plain string) (*AccessToken, error) {
+	var tok AccessToken
+	var expires int64
+
+	err := s.db.QueryRowContext(ctx,
+		`SELECT application_id, user_id, scope, expires_at
+		   FROM access_tokens WHERE token_hash = ?`, secret.HashToken(plain)).
+		Scan(&tok.ApplicationID, &tok.UserID, &tok.Scope, &expires)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, ErrNotFound
+	}
+	if err != nil {
+		return nil, fmt.Errorf("load access token: %w", err)
+	}
+
+	tok.ExpiresAt = time.Unix(expires, 0)
+	if s.now().After(tok.ExpiresAt) {
+		return nil, ErrNotFound
+	}
+	return &tok, nil
+}
+
 // PurgeExpired drops authorization state that is past its lifetime. Consumed
 // codes are kept until they expire so that a replay is still detectable.
 func (s *Store) PurgeExpired(ctx context.Context) error {
@@ -231,6 +314,7 @@ func (s *Store) PurgeExpired(ctx context.Context) error {
 	for _, stmt := range []string{
 		`DELETE FROM auth_requests WHERE expires_at < ?`,
 		`DELETE FROM auth_codes WHERE expires_at < ?`,
+		`DELETE FROM access_tokens WHERE expires_at < ?`,
 	} {
 		if _, err := s.db.ExecContext(ctx, stmt, cutoff); err != nil {
 			return fmt.Errorf("purge expired authorization state: %w", err)

@@ -58,11 +58,13 @@ func run(logger *slog.Logger) error {
 	logger.Info("signing key ready", "kid", signer.KeyID(), "path", cfg.KeysPath)
 
 	provider, err := oidc.New(oidc.Options{
-		Issuer:  cfg.Issuer,
-		Signer:  signer,
-		Store:   db,
-		CodeTTL: cfg.CodeTTL,
-		Logger:  logger,
+		Issuer:         cfg.Issuer,
+		Signer:         signer,
+		Store:          db,
+		CodeTTL:        cfg.CodeTTL,
+		AccessTokenTTL: cfg.AccessTokenTTL,
+		IDTokenTTL:     cfg.IDTokenTTL,
+		Logger:         logger,
 	})
 	if err != nil {
 		return fmt.Errorf("oidc provider: %w", err)

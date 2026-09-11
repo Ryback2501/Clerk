@@ -24,6 +24,8 @@ type flow struct {
 	user     *store.User
 	jar      map[string]string
 	basePath string
+	secret   string
+	signer   *keys.Signer
 }
 
 const testRedirect = "https://app.example.com/cb"
@@ -31,6 +33,11 @@ const testRedirect = "https://app.example.com/cb"
 func newFlow(t *testing.T) *flow { return newFlowWithIssuer(t, "https://idp.example.com") }
 
 func newFlowWithIssuer(t *testing.T, issuerURL string) *flow {
+	return newFlowWith(t, issuerURL, nil)
+}
+
+// newFlowWith builds a flow, letting a test adjust the provider options.
+func newFlowWith(t *testing.T, issuerURL string, configure func(*Options)) *flow {
 	t.Helper()
 	dir := t.TempDir()
 
@@ -49,12 +56,17 @@ func newFlowWithIssuer(t *testing.T, issuerURL string) *flow {
 		t.Fatal(err)
 	}
 
-	p, err := New(Options{Issuer: issuer, Signer: signer, Store: s})
+	opts := Options{Issuer: issuer, Signer: signer, Store: s}
+	if configure != nil {
+		configure(&opts)
+	}
+	p, err := New(opts)
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	app, _, err := s.CreateApplication(context.Background(), "My Test Application", []string{testRedirect})
+	app, appSecret, err := s.CreateApplication(context.Background(), "My Test Application",
+		[]string{testRedirect, "https://app.example.com/other"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -69,6 +81,8 @@ func newFlowWithIssuer(t *testing.T, issuerURL string) *flow {
 		t: t, mux: mux, store: s, app: app, user: user,
 		jar:      map[string]string{},
 		basePath: strings.TrimRight(issuer.Path, "/"),
+		secret:   appSecret,
+		signer:   signer,
 	}
 }
 
