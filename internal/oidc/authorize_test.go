@@ -447,3 +447,43 @@ func mustCode(t *testing.T, rec *httptest.ResponseRecorder) string {
 }
 
 func itoa(i int64) string { return strconv.FormatInt(i, 10) }
+
+// §2 asks for interoperability with standard clients. Many send scopes this
+// provider does not implement (email, offline_access) as a matter of course.
+// Rejecting the whole request would break them for no benefit; RFC 6749 §3.3
+// allows granting a subset, provided the client is told what it actually got.
+func TestUnsupportedScopesAreIgnoredRatherThanRejected(t *testing.T) {
+	f := newFlow(t)
+
+	rec := f.authorize(map[string]string{"scope": "openid profile email offline_access"})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("a request with extra scopes was rejected: %d %s", rec.Code, rec.Body.String())
+	}
+
+	page := rec.Body.String()
+	users := userValuePattern.FindStringSubmatch(page)
+	code := mustCode(t, f.login(page, users[1]))
+
+	stored, err := f.store.ConsumeAuthCode(context.Background(), code)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Only what is actually supported may be granted.
+	if stored.Scope != "openid profile" {
+		t.Errorf("granted scope = %q, want only the supported subset", stored.Scope)
+	}
+}
+
+// Dropping openid is different: without it this is not an OpenID Connect
+// request at all, and no ID token could be issued.
+func TestScopeWithoutOpenIDIsStillRejected(t *testing.T) {
+	f := newFlow(t)
+	rec := f.authorize(map[string]string{"scope": "profile email"})
+	if rec.Code != http.StatusFound {
+		t.Fatalf("status = %d, want a redirect carrying an error", rec.Code)
+	}
+	loc, _ := url.Parse(rec.Header().Get("Location"))
+	if got := loc.Query().Get("error"); got != "invalid_scope" {
+		t.Errorf("error = %q, want invalid_scope", got)
+	}
+}

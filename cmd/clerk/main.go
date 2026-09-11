@@ -96,6 +96,11 @@ func run(logger *slog.Logger) error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
+	// Expired authorization requests and codes are useless but not harmless:
+	// left alone they grow the database without bound. Reclaiming them is
+	// background work, so a failure is logged rather than fatal.
+	go purgeExpired(ctx, db, logger)
+
 	errCh := make(chan error, 1)
 	go func() {
 		logger.Info("listening", "addr", cfg.ListenAddr, "issuer", cfg.Issuer.String())
@@ -117,6 +122,27 @@ func run(logger *slog.Logger) error {
 		return fmt.Errorf("shutdown: %w", err)
 	}
 	return nil
+}
+
+// purgeInterval is how often expired authorization state is reclaimed. The
+// rows are small and short-lived, so this does not need to be frequent.
+const purgeInterval = 10 * time.Minute
+
+// purgeExpired reclaims timed-out authorization state until ctx is cancelled.
+func purgeExpired(ctx context.Context, db *store.Store, logger *slog.Logger) {
+	ticker := time.NewTicker(purgeInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			if err := db.PurgeExpired(ctx); err != nil && ctx.Err() == nil {
+				logger.Error("purge expired authorization state", "err", err)
+			}
+		}
+	}
 }
 
 // newHandler builds the HTTP routes. The provider and the admin interface are

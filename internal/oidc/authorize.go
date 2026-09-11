@@ -111,10 +111,14 @@ func (p *Provider) handleAuthorize(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := validateScope(req.scope); err != nil {
+	granted, err := grantedScope(req.scope)
+	if err != nil {
 		p.redirectError(w, r, req, errInvalidScope, err.Error())
 		return
 	}
+	// Only the supported subset is carried forward, so the token response can
+	// tell the client what it actually received.
+	req.scope = granted
 	if err := validatePKCE(req.codeChallenge, req.codeChallengeMethod); err != nil {
 		p.redirectError(w, r, req, errInvalidRequest, err.Error())
 		return
@@ -283,20 +287,30 @@ func appendQuery(raw string, params url.Values, keepState bool) string {
 	return u.String()
 }
 
-func validateScope(scope string) error {
+// grantedScope narrows a requested scope to what this provider implements.
+//
+// Standard clients routinely request scopes beyond what a given provider
+// supports — email and offline_access especially. RFC 6749 §3.3 permits
+// granting a subset as long as the client is told what it received, which is
+// far more interoperable than refusing the whole request. Missing openid is
+// the one genuine error: without it this is not an OpenID Connect request and
+// no ID token could be issued.
+func grantedScope(scope string) (string, error) {
 	fields := strings.Fields(scope)
 	if len(fields) == 0 {
-		return errors.New("scope is required and must include openid")
+		return "", errors.New("scope is required and must include openid")
 	}
 	if !slices.Contains(fields, scopeOpenID) {
-		return errors.New("scope must include openid")
+		return "", errors.New("scope must include openid")
 	}
-	for _, s := range fields {
-		if !slices.Contains(supportedScopes, s) {
-			return errors.New("unsupported scope: " + s)
+
+	granted := make([]string, 0, len(supportedScopes))
+	for _, s := range supportedScopes {
+		if slices.Contains(fields, s) {
+			granted = append(granted, s)
 		}
 	}
-	return nil
+	return strings.Join(granted, " "), nil
 }
 
 // validatePKCE accepts either no proof key at all or a complete S256
