@@ -45,6 +45,7 @@ is set — otherwise an image would quietly serve an open admin interface.
 | `CLERK_GITHUB_CLIENT_ID` / `_SECRET` | GitHub OAuth credentials. |
 | `CLERK_MICROSOFT_CLIENT_ID` / `_SECRET` | Microsoft OAuth credentials. |
 | `CLERK_LINKEDIN_CLIENT_ID` / `_SECRET` | LinkedIn OAuth credentials. |
+| `CLERK_<PROVIDER>_ISSUER` | Overrides that provider's OIDC issuer. Microsoft **single-tenant** applications need `CLERK_MICROSOFT_ISSUER=https://login.microsoftonline.com/<tenant-id>/v2.0`; the default is the multi-tenant endpoint and a single-tenant app's tokens would not validate against it. |
 
 At least one provider is required. Register this callback with each one, exactly:
 

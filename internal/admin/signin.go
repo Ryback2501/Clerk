@@ -3,6 +3,7 @@ package admin
 import (
 	"errors"
 	"net/http"
+	"net/url"
 	"strings"
 
 	"github.com/Ryback2501/Clerk/internal/adminauth"
@@ -32,7 +33,7 @@ func (h *Handler) showSignIn(w http.ResponseWriter, r *http.Request) {
 
 	data := h.newPageData(w, r, nil, "Sign in")
 	data.Providers = h.oauth.EnabledProviders()
-	data.Error = r.URL.Query().Get("error")
+	data.Error = signInMessage(r.URL.Query().Get("error"))
 	h.render(w, r, "signin", http.StatusOK, data)
 }
 
@@ -47,7 +48,7 @@ func (h *Handler) startSignIn(w http.ResponseWriter, r *http.Request) {
 	authURL, err := h.oauth.Start(r.Context(), provider, "/admin")
 	if err != nil {
 		h.logger.ErrorContext(r.Context(), "start admin sign-in", "err", err, "provider", provider)
-		h.redirectToSignIn(w, r, "The sign-in could not be started.")
+		h.redirectToSignIn(w, r, problemNotStarted)
 		return
 	}
 	http.Redirect(w, r, authURL, http.StatusSeeOther)
@@ -60,7 +61,7 @@ func (h *Handler) completeSignIn(w http.ResponseWriter, r *http.Request) {
 	if providerErr := r.URL.Query().Get("error"); providerErr != "" {
 		h.logger.WarnContext(r.Context(), "provider refused the admin sign-in",
 			"provider", provider, "error", providerErr)
-		h.redirectToSignIn(w, r, "The provider did not complete the sign-in.")
+		h.redirectToSignIn(w, r, problemRefused)
 		return
 	}
 
@@ -89,7 +90,7 @@ func (h *Handler) completeSignIn(w http.ResponseWriter, r *http.Request) {
 
 	default:
 		h.logger.WarnContext(r.Context(), "admin sign-in failed", "provider", provider, "err", err)
-		h.redirectToSignIn(w, r, "The sign-in could not be completed. Please try again.")
+		h.redirectToSignIn(w, r, problemFailed)
 		return
 	}
 
@@ -134,10 +135,37 @@ func (h *Handler) signOut(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, signInPath, http.StatusSeeOther)
 }
 
-func (h *Handler) redirectToSignIn(w http.ResponseWriter, r *http.Request, message string) {
+// signInProblem identifies why a sign-in did not complete.
+type signInProblem string
+
+const (
+	problemNotStarted signInProblem = "not_started"
+	problemFailed     signInProblem = "failed"
+	problemRefused    signInProblem = "refused"
+)
+
+// signInMessages maps a problem to the text shown.
+//
+// The code travels in the URL, never the message. Reflecting arbitrary text
+// into the page would let anyone hand a victim a sign-in link displaying
+// whatever they liked — escaped, so not script injection, but a convincing
+// place to put a phone number to call.
+var signInMessages = map[signInProblem]string{
+	problemNotStarted: "The sign-in could not be started. Please try again.",
+	problemFailed:     "The sign-in could not be completed. Please try again.",
+	problemRefused:    "The provider did not complete the sign-in.",
+}
+
+func (h *Handler) redirectToSignIn(w http.ResponseWriter, r *http.Request, problem signInProblem) {
 	target := signInPath
-	if message != "" {
-		target += "?error=" + urlQueryEscape(message)
+	if problem != "" {
+		target += "?error=" + url.QueryEscape(string(problem))
 	}
 	http.Redirect(w, r, target, http.StatusSeeOther)
+}
+
+// signInMessage resolves a query parameter to one of the fixed messages,
+// ignoring anything unrecognised.
+func signInMessage(code string) string {
+	return signInMessages[signInProblem(code)]
 }

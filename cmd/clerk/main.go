@@ -144,6 +144,7 @@ func buildAdmin(ctx context.Context, cfg *config.Config, db *store.Store, logger
 		providers[name] = adminauth.ClientCredentials{
 			ClientID:     creds.ClientID,
 			ClientSecret: creds.ClientSecret,
+			Issuer:       creds.Issuer,
 		}
 	}
 

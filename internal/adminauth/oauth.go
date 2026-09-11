@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -93,6 +94,14 @@ type OAuthConfig struct {
 type ClientCredentials struct {
 	ClientID     string
 	ClientSecret string
+
+	// Issuer overrides the provider's default OIDC issuer.
+	//
+	// Microsoft is the reason this exists: the default covers the multi-tenant
+	// "common" endpoint, and a single-tenant application must use its own
+	// tenant's issuer or token validation fails. It is also what lets tests
+	// point a provider at a local stand-in without mutating package state.
+	Issuer string
 }
 
 // OAuth signs administrators in with an external provider and then asks the
@@ -156,6 +165,13 @@ func NewOAuth(ctx context.Context, cfg OAuthConfig) (*OAuth, error) {
 		}
 		if creds.ClientID == "" || creds.ClientSecret == "" {
 			return nil, fmt.Errorf("adminauth: provider %q needs both a client id and a client secret", name)
+		}
+
+		if creds.Issuer != "" {
+			if kind.Issuer == "" {
+				return nil, fmt.Errorf("adminauth: provider %q has no OIDC issuer to override", name)
+			}
+			kind.Issuer = creds.Issuer
 		}
 
 		built, err := a.configure(ctx, kind, creds)
@@ -324,18 +340,11 @@ func (a *OAuth) identify(ctx context.Context, built *configuredProvider, token *
 		return Identity{}, fmt.Errorf("%w: the ID token's nonce does not match this sign-in", ErrUnauthenticated)
 	}
 
-	var raw []byte
+	// json.RawMessage rather than []byte: Claims unmarshals into the target,
+	// and a JSON object cannot be unmarshalled into a byte slice at all.
+	var raw json.RawMessage
 	if err := verified.Claims(&raw); err != nil {
-		// Claims into a []byte is not supported by every version; fall back to
-		// a map and re-encode below.
-		raw = nil
-	}
-	if raw == nil {
-		var claims map[string]any
-		if err := verified.Claims(&claims); err != nil {
-			return Identity{}, fmt.Errorf("%w: the ID token's claims could not be read: %v", ErrUnauthenticated, err)
-		}
-		raw = mustJSON(claims)
+		return Identity{}, fmt.Errorf("%w: the ID token's claims could not be read: %v", ErrUnauthenticated, err)
 	}
 
 	identity, err := built.kind.identityFromClaims(raw, nil)

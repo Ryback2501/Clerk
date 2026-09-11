@@ -192,13 +192,3 @@ func displayName(candidates ...string) string {
 	}
 	return "Administrator"
 }
-
-// mustJSON re-encodes claims that were decoded into a map. Marshalling a
-// map[string]any of JSON-derived values cannot fail.
-func mustJSON(v any) []byte {
-	b, err := json.Marshal(v)
-	if err != nil {
-		return []byte("{}")
-	}
-	return b
-}

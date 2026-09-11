@@ -172,16 +172,13 @@ func newOAuthUnderTest(t *testing.T, idp *fakeIDP, provider string, auth Authori
 	t.Helper()
 	public, _ := url.Parse("https://clerk.example.com")
 
-	// Point the named provider's issuer at the fake.
-	original := SupportedProviders[provider]
-	patched := original
-	patched.Issuer = idp.server.URL
-	SupportedProviders[provider] = patched
-	t.Cleanup(func() { SupportedProviders[provider] = original })
-
+	// The issuer override points this provider at the fake, so the shared
+	// provider table is never mutated and the tests stay independent.
 	a, err := NewOAuth(context.Background(), OAuthConfig{
-		PublicURL:  public,
-		Providers:  map[string]ClientCredentials{provider: {ClientID: "test-client", ClientSecret: "test-secret"}},
+		PublicURL: public,
+		Providers: map[string]ClientCredentials{provider: {
+			ClientID: "test-client", ClientSecret: "test-secret", Issuer: idp.server.URL,
+		}},
 		Store:      store,
 		Authorizer: auth,
 		HTTPClient: idp.server.Client(),
@@ -438,5 +435,23 @@ func TestEnabledProvidersIsStable(t *testing.T) {
 		if got := strings.Join(a.EnabledProviders(), ","); got != first {
 			t.Fatalf("EnabledProviders() reordered: %q then %q", first, got)
 		}
+	}
+}
+
+// Overriding the issuer of a provider that has none is a configuration
+// mistake, not something to ignore.
+func TestIssuerOverrideOnANonOIDCProviderIsRejected(t *testing.T) {
+	public, _ := url.Parse("https://clerk.example.com")
+
+	_, err := NewOAuth(context.Background(), OAuthConfig{
+		PublicURL: public,
+		Providers: map[string]ClientCredentials{"github": {
+			ClientID: "a", ClientSecret: "b", Issuer: "https://example.com",
+		}},
+		Store:      newMemoryStore(),
+		Authorizer: &recordingAuthorizer{},
+	})
+	if err == nil {
+		t.Error("an issuer override was accepted for a provider with no OIDC issuer")
 	}
 }

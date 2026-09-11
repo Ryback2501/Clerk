@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"fmt"
 	"net/http"
-	"net/url"
 	"strconv"
 
 	"github.com/Ryback2501/Clerk/internal/adminauth"
@@ -23,9 +22,6 @@ func (h *Handler) newPageData(w http.ResponseWriter, r *http.Request, admin *adm
 		SignedIn:  admin != nil && h.oauth != nil,
 	}
 }
-
-// urlQueryEscape escapes a value for use in a query string.
-func urlQueryEscape(v string) string { return url.QueryEscape(v) }
 
 // render writes a page. The template is executed into a buffer first: a failure
 // halfway through would otherwise emit a half-written page under a 200 status,

@@ -57,6 +57,12 @@ type Config struct {
 type OAuthCredentials struct {
 	ClientID     string
 	ClientSecret string
+
+	// Issuer overrides the provider's default OIDC issuer, read from
+	// CLERK_<PROVIDER>_ISSUER. Microsoft single-tenant applications need this:
+	// the default is the multi-tenant endpoint, and a single-tenant app's
+	// tokens are issued by its own tenant.
+	Issuer string
 }
 
 // adminProviderNames are the upstreams that can be configured. Each reads
@@ -144,7 +150,11 @@ func loadAdminProviders(getenv Getenv) (map[string]OAuthCredentials, []error) {
 		case secret == "":
 			problems = append(problems, fmt.Errorf("%s_CLIENT_ID is set but %s_CLIENT_SECRET is missing", prefix, prefix))
 		default:
-			providers[name] = OAuthCredentials{ClientID: id, ClientSecret: secret}
+			providers[name] = OAuthCredentials{
+				ClientID:     id,
+				ClientSecret: secret,
+				Issuer:       strings.TrimSpace(getenv(prefix + "_ISSUER")),
+			}
 		}
 	}
 	return providers, problems
