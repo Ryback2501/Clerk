@@ -13,7 +13,6 @@ import (
 // pageData is the view model every admin template renders against.
 type pageData struct {
 	Title    string
-	Theme    string
 	Admin    *adminauth.Admin
 	Insecure bool
 
@@ -73,7 +72,7 @@ func (h *Handler) createApplication(w http.ResponseWriter, r *http.Request, admi
 	h.logger.InfoContext(r.Context(), "application created",
 		"application_id", app.ID, "client_id", app.ClientID, "admin", admin.Subject)
 
-	h.revealOnce(w, plainSecret)
+	h.revealOnce(w, app.ID, plainSecret)
 	http.Redirect(w, r, "/admin/applications/"+strconv.FormatInt(app.ID, 10), http.StatusSeeOther)
 }
 
@@ -85,7 +84,7 @@ func (h *Handler) showApplication(w http.ResponseWriter, r *http.Request, admin 
 
 	data := h.newPageData(w, r, admin, app.Name)
 	data.Application = app
-	data.RevealedSecret = h.takeRevealed(w, r)
+	data.RevealedSecret = h.takeRevealed(w, r, app.ID)
 	h.render(w, r, "application", http.StatusOK, data)
 }
 
@@ -105,7 +104,7 @@ func (h *Handler) regenerateSecret(w http.ResponseWriter, r *http.Request, admin
 	h.logger.InfoContext(r.Context(), "client secret regenerated",
 		"application_id", app.ID, "client_id", app.ClientID, "admin", admin.Subject)
 
-	h.revealOnce(w, plainSecret)
+	h.revealOnce(w, app.ID, plainSecret)
 	http.Redirect(w, r, "/admin/applications/"+strconv.FormatInt(app.ID, 10), http.StatusSeeOther)
 }
 

@@ -13,7 +13,6 @@ import (
 func (h *Handler) newPageData(w http.ResponseWriter, r *http.Request, admin *adminauth.Admin, title string) pageData {
 	return pageData{
 		Title:     title,
-		Theme:     "auto",
 		Admin:     admin,
 		Insecure:  h.insecure,
 		CSRFToken: h.csrf.issue(w, r),
@@ -82,8 +81,8 @@ func (h *Handler) internalError(w http.ResponseWriter, r *http.Request, admin *a
 
 // revealOnce stashes a freshly generated secret and hands the browser the
 // single-use token that displays it.
-func (h *Handler) revealOnce(w http.ResponseWriter, plainSecret string) {
-	token := h.reveal.put(plainSecret)
+func (h *Handler) revealOnce(w http.ResponseWriter, applicationID int64, plainSecret string) {
+	token := h.reveal.put(applicationID, plainSecret)
 	if token == "" {
 		return
 	}
@@ -99,9 +98,16 @@ func (h *Handler) revealOnce(w http.ResponseWriter, plainSecret string) {
 
 // takeRevealed consumes the reveal token, if the request carries one, and
 // clears the cookie so a reload cannot show the secret again.
-func (h *Handler) takeRevealed(w http.ResponseWriter, r *http.Request) string {
+func (h *Handler) takeRevealed(w http.ResponseWriter, r *http.Request, applicationID int64) string {
 	cookie, err := r.Cookie(revealCookieName)
 	if err != nil || cookie.Value == "" {
+		return ""
+	}
+
+	plain, ok := h.reveal.take(cookie.Value, applicationID)
+	if !ok {
+		// Leave the cookie in place: the secret may still belong to another
+		// application the administrator has not visited yet.
 		return ""
 	}
 
@@ -113,10 +119,5 @@ func (h *Handler) takeRevealed(w http.ResponseWriter, r *http.Request) string {
 		SameSite: http.SameSiteLaxMode,
 		MaxAge:   -1,
 	})
-
-	plain, ok := h.reveal.take(cookie.Value)
-	if !ok {
-		return ""
-	}
 	return plain
 }

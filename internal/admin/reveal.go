@@ -30,8 +30,9 @@ type revealStore struct {
 }
 
 type revealEntry struct {
-	secret    string
-	expiresAt time.Time
+	applicationID int64
+	secret        string
+	expiresAt     time.Time
 }
 
 func newRevealStore() *revealStore {
@@ -41,8 +42,9 @@ func newRevealStore() *revealStore {
 	}
 }
 
-// put stores a secret and returns the single-use token that retrieves it.
-func (s *revealStore) put(value string) string {
+// put stores a secret for one application and returns the single-use token
+// that retrieves it.
+func (s *revealStore) put(applicationID int64, value string) string {
 	token, err := secret.Token(revealTokenBytes)
 	if err != nil {
 		return ""
@@ -51,13 +53,22 @@ func (s *revealStore) put(value string) string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.evictExpiredLocked()
-	s.entries[token] = revealEntry{secret: value, expiresAt: s.now().Add(revealTTL)}
+	s.entries[token] = revealEntry{
+		applicationID: applicationID,
+		secret:        value,
+		expiresAt:     s.now().Add(revealTTL),
+	}
 	return token
 }
 
 // take returns the secret for token and removes it, so a refresh cannot show
 // the secret a second time.
-func (s *revealStore) take(token string) (string, bool) {
+//
+// The secret is released only to the application it was generated for. A
+// lookup from a different application is refused and, deliberately, does not
+// consume the entry: navigating elsewhere must not destroy a secret that has
+// not been shown yet.
+func (s *revealStore) take(token string, applicationID int64) (string, bool) {
 	if token == "" {
 		return "", false
 	}
@@ -67,6 +78,9 @@ func (s *revealStore) take(token string) (string, bool) {
 
 	entry, ok := s.entries[token]
 	if !ok {
+		return "", false
+	}
+	if entry.applicationID != applicationID {
 		return "", false
 	}
 	delete(s.entries, token)

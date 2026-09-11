@@ -378,3 +378,33 @@ func seedUsers(t *testing.T, h *harness, appID int64, n int) {
 }
 
 func itoa(i int64) string { return strconv.FormatInt(i, 10) }
+
+// The one-time secret must appear only on the application it belongs to.
+func TestRevealedSecretDoesNotLeakOntoAnotherApplication(t *testing.T) {
+	h := newHarness(t)
+	first := h.createApp("First", "https://a.example.com/cb")
+	second := h.createApp("Second", "https://b.example.com/cb")
+
+	// Creating "Second" left a pending reveal. Viewing "First" must not show it.
+	body := h.get("/admin/applications/" + itoa(first)).Body.String()
+	if strings.Contains(body, "Copy it now") {
+		t.Error("another application's secret was displayed on this page")
+	}
+
+	// It is still available where it belongs.
+	if !strings.Contains(h.get("/admin/applications/"+itoa(second)).Body.String(), "Copy it now") {
+		t.Error("the secret was not shown on the application it was generated for")
+	}
+}
+
+// Pico guards its dark palette with :root:not([data-theme]), so emitting any
+// data-theme value at all pins the UI to light mode regardless of the reader's
+// system preference.
+func TestPageDoesNotPinTheColourTheme(t *testing.T) {
+	h := newHarness(t)
+	body := h.get("/admin").Body.String()
+
+	if strings.Contains(body, "data-theme") {
+		t.Error("the page sets data-theme, which disables Pico's automatic dark mode")
+	}
+}
