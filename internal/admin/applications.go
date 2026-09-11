@@ -21,8 +21,14 @@ type pageData struct {
 
 	Applications []*store.Application
 	Application  *store.Application
+	Users        []*store.User
 	UserCount    int
 	Form         applicationForm
+
+	// UserError and UserForm carry a rejected "add user" submission back to
+	// the page it came from.
+	UserError string
+	UserForm  string
 
 	// RevealedSecret is set only on the single render that follows generating
 	// a secret. It is never stored and never shown again.
@@ -86,8 +92,15 @@ func (h *Handler) showApplication(w http.ResponseWriter, r *http.Request, admin 
 		return
 	}
 
+	users, err := h.store.ListUsers(r.Context(), app.ID)
+	if err != nil {
+		h.internalError(w, r, admin, "list users", err)
+		return
+	}
+
 	data := h.newPageData(w, r, admin, app.Name)
 	data.Application = app
+	data.Users = users
 	data.RevealedSecret = h.takeRevealed(w, r, app.ID)
 	h.render(w, r, "application", http.StatusOK, data)
 }
@@ -205,7 +218,7 @@ func (h *Handler) redisplayApplication(w http.ResponseWriter, r *http.Request, a
 		return
 	}
 
-	app, err := h.store.GetApplication(r.Context(), id)
+	app, users, err := h.applicationWithUsers(r, id)
 	if err != nil {
 		h.internalError(w, r, admin, "load application", err)
 		return
@@ -213,6 +226,7 @@ func (h *Handler) redisplayApplication(w http.ResponseWriter, r *http.Request, a
 
 	data := h.newPageData(w, r, admin, app.Name)
 	data.Application = app
+	data.Users = users
 	data.Error = validationMessage(cause)
 	h.render(w, r, "application", http.StatusUnprocessableEntity, data)
 }

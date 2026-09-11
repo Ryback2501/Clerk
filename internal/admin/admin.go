@@ -123,6 +123,8 @@ func (h *Handler) Register(mux *http.ServeMux) {
 	mux.HandleFunc("POST /admin/applications/{id}/redirect-uris/remove", h.guardWrite(h.removeRedirectURI))
 	mux.HandleFunc("GET /admin/applications/{id}/delete", h.guard(h.confirmDeleteApplication))
 	mux.HandleFunc("POST /admin/applications/{id}/delete", h.guardWrite(h.deleteApplication))
+	mux.HandleFunc("POST /admin/applications/{id}/users", h.guardWrite(h.createUser))
+	mux.HandleFunc("POST /admin/applications/{id}/users/{userID}/delete", h.guardWrite(h.deleteUser))
 }
 
 // handlerFunc is a route that has already been authorised.
