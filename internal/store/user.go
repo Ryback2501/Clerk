@@ -64,9 +64,11 @@ func (s *Store) CreateUser(ctx context.Context, appID int64, username string) (*
 		`INSERT INTO users (application_id, username, sub) VALUES (?, ?, ?)`,
 		appID, username, sub)
 	if err != nil {
-		// The only uniqueness an administrator can trip is the username within
-		// this application; a sub collision at 128 bits is not a real case.
-		if isUniqueViolation(err) {
+		// Only a duplicate name is the administrator's to fix. A sub collision
+		// would be a 128-bit coincidence and is a fault, not a validation
+		// failure — reporting it as "that name is taken" would send them
+		// chasing a problem that does not exist.
+		if isDuplicateUsername(err) {
 			return nil, invalidf("a user named %q already exists in this application", username)
 		}
 		return nil, fmt.Errorf("insert user: %w", err)
@@ -162,9 +164,17 @@ func validateUsername(username string) error {
 	return nil
 }
 
-// isUniqueViolation reports whether err is a SQLite uniqueness constraint
-// failure. The driver does not export a typed error for this, so the message
-// is the only signal available.
-func isUniqueViolation(err error) bool {
-	return err != nil && strings.Contains(strings.ToUpper(err.Error()), "UNIQUE CONSTRAINT FAILED")
+// isDuplicateUsername reports whether err is the uniqueness failure caused by
+// reusing a name within one application, as opposed to any other constraint.
+//
+// The driver exports no typed error, so the message is the only signal
+// available; it names the columns, which is what makes the two cases
+// separable.
+func isDuplicateUsername(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "unique constraint failed") &&
+		strings.Contains(msg, "users.username")
 }

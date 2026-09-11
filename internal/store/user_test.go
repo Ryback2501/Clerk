@@ -272,3 +272,39 @@ func TestGetUserBySub(t *testing.T) {
 		t.Errorf("unknown sub returned %v, want ErrNotFound", err)
 	}
 }
+
+// The users table has two uniqueness rules, and only one of them is the
+// administrator's fault. Reporting a sub collision as "that name is taken"
+// would send them chasing a problem that does not exist.
+func TestUniqueViolationsAreAttributedToTheRightConstraint(t *testing.T) {
+	tests := []struct {
+		name        string
+		message     string
+		wantOnName  bool
+		description string
+	}{
+		{
+			name:       "duplicate username within an application",
+			message:    "constraint failed: UNIQUE constraint failed: users.application_id, users.username (2067)",
+			wantOnName: true,
+		},
+		{
+			name:       "subject identifier collision",
+			message:    "constraint failed: UNIQUE constraint failed: users.sub (2067)",
+			wantOnName: false,
+		},
+		{
+			name:       "an unrelated failure",
+			message:    "disk I/O error",
+			wantOnName: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := isDuplicateUsername(errors.New(tt.message)); got != tt.wantOnName {
+				t.Errorf("isDuplicateUsername(%q) = %v, want %v", tt.message, got, tt.wantOnName)
+			}
+		})
+	}
+}
