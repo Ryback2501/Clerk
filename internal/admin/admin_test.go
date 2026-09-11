@@ -13,6 +13,7 @@ import (
 
 	"github.com/Ryback2501/Clerk/internal/adminauth"
 	"github.com/Ryback2501/Clerk/internal/store"
+	"github.com/Ryback2501/Clerk/internal/web"
 )
 
 type harness struct {
@@ -70,7 +71,7 @@ func (h *harness) get(path string) *httptest.ResponseRecorder {
 // post submits a form, first fetching a page to pick up a valid CSRF token.
 func (h *harness) post(path string, form url.Values) *httptest.ResponseRecorder {
 	h.t.Helper()
-	form.Set(csrfFieldName, h.csrfToken())
+	form.Set(web.CSRFFieldName, h.csrfToken())
 	req := httptest.NewRequest(http.MethodPost, path, strings.NewReader(form.Encode()))
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	return h.do(req)
@@ -355,17 +356,6 @@ func TestApplicationNameIsEscaped(t *testing.T) {
 	}
 }
 
-func TestStaticAssetsAreServed(t *testing.T) {
-	h := newHarness(t)
-	rec := h.get("/admin/static/pico.min.css")
-	if rec.Code != http.StatusOK {
-		t.Fatalf("GET the stylesheet = %d, want 200", rec.Code)
-	}
-	if ct := rec.Header().Get("Content-Type"); !strings.Contains(ct, "css") {
-		t.Errorf("Content-Type = %q, want a CSS type", ct)
-	}
-}
-
 func seedUsers(t *testing.T, h *harness, appID int64, n int) {
 	t.Helper()
 	for i := range n {
@@ -483,14 +473,6 @@ func TestAdminTrailingSlashReachesTheInterface(t *testing.T) {
 	rec := h.get("/admin/")
 	if rec.Code != http.StatusOK && rec.Code != http.StatusMovedPermanently {
 		t.Errorf("GET /admin/ = %d, want the interface or a redirect to it", rec.Code)
-	}
-}
-
-func TestStaticDirectoryIsNotBrowsable(t *testing.T) {
-	h := newHarness(t)
-	rec := h.get("/admin/static/")
-	if rec.Code == http.StatusOK && strings.Contains(rec.Body.String(), "pico.min.css") {
-		t.Error("the static directory returns a browsable index of its contents")
 	}
 }
 

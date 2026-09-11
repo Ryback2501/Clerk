@@ -1,0 +1,20 @@
+{{define "layout" -}}
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{{.Title}}</title>
+  <link rel="stylesheet" href="{{.Stylesheet}}">
+  <style>
+    body > main { max-width: 28rem; padding-block: 3rem; }
+    .muted { color: var(--pico-muted-color); }
+  </style>
+</head>
+<body>
+<main class="container">
+{{template "content" .}}
+</main>
+</body>
+</html>
+{{- end}}

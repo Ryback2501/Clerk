@@ -23,6 +23,7 @@ import (
 	"github.com/Ryback2501/Clerk/internal/keys"
 	"github.com/Ryback2501/Clerk/internal/oidc"
 	"github.com/Ryback2501/Clerk/internal/store"
+	"github.com/Ryback2501/Clerk/internal/web"
 )
 
 // Shutdown budget for in-flight requests once a signal arrives.
@@ -56,7 +57,16 @@ func run(logger *slog.Logger) error {
 	// The key id is safe to log; the key itself never is.
 	logger.Info("signing key ready", "kid", signer.KeyID(), "path", cfg.KeysPath)
 
-	provider := oidc.New(cfg.Issuer, signer).WithLogger(logger)
+	provider, err := oidc.New(oidc.Options{
+		Issuer:  cfg.Issuer,
+		Signer:  signer,
+		Store:   db,
+		CodeTTL: cfg.CodeTTL,
+		Logger:  logger,
+	})
+	if err != nil {
+		return fmt.Errorf("oidc provider: %w", err)
+	}
 
 	// Admin authentication is not implemented yet, so the only authenticator
 	// available authorises everyone. Refuse to start in that state unless the
@@ -116,6 +126,7 @@ func newHandler(provider *oidc.Provider, adminHandler *admin.Handler) http.Handl
 	mux := http.NewServeMux()
 	provider.Register(mux)
 	adminHandler.Register(mux)
+	web.Register(mux)
 	mux.HandleFunc("GET /health", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)

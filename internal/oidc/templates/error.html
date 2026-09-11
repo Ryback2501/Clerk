@@ -1,0 +1,11 @@
+{{define "content" -}}
+<hgroup>
+  <h1>{{.Title}}</h1>
+  <p>{{.Message}}</p>
+</hgroup>
+{{if .Detail}}<p class="muted"><small>{{.Detail}}</small></p>{{end}}
+<p class="muted"><small>
+  Nothing was sent back to the requesting application, because this request could
+  not be shown to belong to it.
+</small></p>
+{{- end}}
