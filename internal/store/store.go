@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"time"
 
 	// Registers the pure-Go "sqlite" driver, so the binary needs no cgo and can
 	// run on a distroless base image.
@@ -23,6 +24,9 @@ var migrationFS embed.FS
 // Store is a handle to the database and the migrations applied to it.
 type Store struct {
 	db *sql.DB
+
+	// now is injectable so expiry behaviour can be tested without sleeping.
+	now func() time.Time
 }
 
 // Open connects to the SQLite database at path, creating the file and any
@@ -42,7 +46,7 @@ func Open(path string) (*Store, error) {
 	// call for a tool whose whole database is a handful of small tables.
 	db.SetMaxOpenConns(1)
 
-	s := &Store{db: db}
+	s := &Store{db: db, now: time.Now}
 	if err := s.verifyPragmas(); err != nil {
 		_ = db.Close()
 		return nil, err

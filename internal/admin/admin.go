@@ -18,13 +18,11 @@ import (
 
 	"github.com/Ryback2501/Clerk/internal/adminauth"
 	"github.com/Ryback2501/Clerk/internal/store"
+	"github.com/Ryback2501/Clerk/internal/web"
 )
 
 //go:embed all:templates
 var templateFS embed.FS
-
-//go:embed all:static
-var staticFS embed.FS
 
 // revealCookiePrefix begins the name of the cookie carrying the single-use
 // token that reveals a freshly generated client secret. The application id is
@@ -37,7 +35,7 @@ type Handler struct {
 	auth   adminauth.Authenticator
 	logger *slog.Logger
 
-	csrf   *csrf
+	csrf   *web.CSRF
 	reveal *revealStore
 	pages  map[string]*template.Template
 
@@ -57,7 +55,7 @@ func New(s *store.Store, auth adminauth.Authenticator, insecure bool) (*Handler,
 		store:    s,
 		auth:     auth,
 		logger:   slog.Default(),
-		csrf:     newCSRF(),
+		csrf:     web.NewCSRF(web.AdminCSRFCookie),
 		reveal:   newRevealStore(),
 		pages:    pages,
 		insecure: insecure,
@@ -99,16 +97,6 @@ func parsePages() (map[string]*template.Template, error) {
 
 // Register wires the admin routes onto mux.
 func (h *Handler) Register(mux *http.ServeMux) {
-	static, err := fs.Sub(staticFS, "static")
-	if err != nil {
-		// The directory is embedded at build time, so this cannot fail in a
-		// built binary.
-		panic(fmt.Sprintf("admin: embedded static assets unavailable: %v", err))
-	}
-	// noDirFS keeps http.FileServer from serving a browsable index of whatever
-	// ends up in the embedded asset tree.
-	mux.Handle("GET /admin/static/", http.StripPrefix("/admin/static/", http.FileServer(http.FS(noDirFS{static}))))
-
 	mux.HandleFunc("GET /admin", h.guard(h.listApplications))
 	// ServeMux only synthesises /x -> /x/, never the reverse, so the
 	// trailing-slash form has to be registered explicitly.
@@ -145,7 +133,7 @@ func (h *Handler) guard(next handlerFunc) http.HandlerFunc {
 // guardWrite additionally enforces CSRF on state-changing routes.
 func (h *Handler) guardWrite(next handlerFunc) http.HandlerFunc {
 	return h.guard(func(w http.ResponseWriter, r *http.Request, admin *adminauth.Admin) {
-		if err := h.csrf.check(r); err != nil {
+		if err := h.csrf.Check(r); err != nil {
 			h.logger.WarnContext(r.Context(), "rejected a request failing CSRF validation",
 				"path", r.URL.Path, "method", r.Method)
 			h.renderError(w, r, admin, http.StatusForbidden, "Request rejected",
@@ -177,25 +165,4 @@ func (h *Handler) denied(w http.ResponseWriter, r *http.Request, err error) {
 		h.renderError(w, r, nil, http.StatusInternalServerError, "Something went wrong",
 			"The request could not be completed.")
 	}
-}
-
-// noDirFS is an fs.FS that refuses to open directories, so a file server built
-// on it cannot list their contents.
-type noDirFS struct{ fs.FS }
-
-func (f noDirFS) Open(name string) (fs.File, error) {
-	file, err := f.FS.Open(name)
-	if err != nil {
-		return nil, err
-	}
-	info, err := file.Stat()
-	if err != nil {
-		_ = file.Close()
-		return nil, err
-	}
-	if info.IsDir() {
-		_ = file.Close()
-		return nil, fs.ErrNotExist
-	}
-	return file, nil
 }

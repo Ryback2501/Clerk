@@ -6,13 +6,36 @@
 package oidc
 
 import (
+	"bytes"
+	"embed"
 	"encoding/json"
+	"errors"
+	"fmt"
+	"html/template"
+	"io/fs"
 	"log/slog"
 	"net/http"
 	"net/url"
 	"strings"
+	"time"
 
 	"github.com/Ryback2501/Clerk/internal/keys"
+	"github.com/Ryback2501/Clerk/internal/store"
+	"github.com/Ryback2501/Clerk/internal/web"
+)
+
+//go:embed all:templates
+var templateFS embed.FS
+
+// Defaults for the lifetimes the provider controls.
+const (
+	// DefaultCodeTTL is short by design: an authorization code is redeemed
+	// within seconds of being issued, so a long window only widens the
+	// opportunity to replay an intercepted one.
+	DefaultCodeTTL = time.Minute
+
+	// DefaultAuthRequestTTL bounds how long a rendered login page stays valid.
+	DefaultAuthRequestTTL = 15 * time.Minute
 )
 
 // Endpoint paths, relative to the issuer.
@@ -24,23 +47,182 @@ const (
 	JWKSPath      = "/jwks"
 )
 
+// Options are the dependencies a Provider needs.
+type Options struct {
+	// Issuer is the public base URL of this provider.
+	Issuer *url.URL
+
+	// Signer holds the RS256 key ID tokens are signed with.
+	Signer *keys.Signer
+
+	// Store is the database the provider reads clients and users from.
+	Store *store.Store
+
+	// CodeTTL and AuthRequestTTL default when left zero.
+	CodeTTL        time.Duration
+	AuthRequestTTL time.Duration
+
+	// Logger defaults to the package-level logger.
+	Logger *slog.Logger
+}
+
 // Provider serves the OIDC endpoints.
 type Provider struct {
 	issuer *url.URL
 	signer *keys.Signer
+	store  *store.Store
 	logger *slog.Logger
+
+	csrf  *web.CSRF
+	pages map[string]*template.Template
+
+	codeTTL        time.Duration
+	authRequestTTL time.Duration
 }
 
-// New builds a Provider for the given issuer identity and signing key.
-func New(issuer *url.URL, signer *keys.Signer) *Provider {
-	return &Provider{issuer: issuer, signer: signer, logger: slog.Default()}
+// New builds a Provider.
+func New(opts Options) (*Provider, error) {
+	switch {
+	case opts.Issuer == nil:
+		return nil, errors.New("oidc: an issuer is required")
+	case opts.Signer == nil:
+		return nil, errors.New("oidc: a signing key is required")
+	case opts.Store == nil:
+		return nil, errors.New("oidc: a store is required")
+	}
+
+	pages, err := parsePages()
+	if err != nil {
+		return nil, err
+	}
+
+	p := &Provider{
+		issuer:         opts.Issuer,
+		signer:         opts.Signer,
+		store:          opts.Store,
+		logger:         opts.Logger,
+		csrf:           web.NewCSRF(web.LoginCSRFCookie),
+		pages:          pages,
+		codeTTL:        opts.CodeTTL,
+		authRequestTTL: opts.AuthRequestTTL,
+	}
+	if p.logger == nil {
+		p.logger = slog.Default()
+	}
+	if p.codeTTL == 0 {
+		p.codeTTL = DefaultCodeTTL
+	}
+	if p.authRequestTTL == 0 {
+		p.authRequestTTL = DefaultAuthRequestTTL
+	}
+	return p, nil
 }
 
-// WithLogger returns a copy of p that logs to the given logger.
-func (p *Provider) WithLogger(l *slog.Logger) *Provider {
-	clone := *p
-	clone.logger = l
-	return &clone
+// parsePages pairs each content template with the shared layout.
+func parsePages() (map[string]*template.Template, error) {
+	names, err := fs.Glob(templateFS, "templates/*.html")
+	if err != nil {
+		return nil, fmt.Errorf("list templates: %w", err)
+	}
+
+	pages := make(map[string]*template.Template)
+	for _, name := range names {
+		base := strings.TrimSuffix(strings.TrimPrefix(name, "templates/"), ".html")
+		if base == "layout" {
+			continue
+		}
+		t, err := template.ParseFS(templateFS, "templates/layout.html", name)
+		if err != nil {
+			return nil, fmt.Errorf("parse template %s: %w", name, err)
+		}
+		pages[base] = t
+	}
+	if len(pages) == 0 {
+		return nil, errors.New("oidc: no templates were embedded")
+	}
+	return pages, nil
+}
+
+// pageData is the view model the login and error pages render against.
+type pageData struct {
+	Title           string
+	Stylesheet      string
+	ApplicationName string
+	Message         string
+	Detail          string
+	Users           []*store.User
+	RequestID       string
+	CSRFToken       string
+	CSRFField       string
+
+	// AuthorizeAction is where the login form posts. It is rendered rather
+	// than hardcoded because the endpoints are mounted under the issuer's
+	// path, and a form pointing at the server root would be unreachable there.
+	AuthorizeAction string
+
+	// formAction is the value of the CSP directive of the same name, empty on
+	// pages that submit nowhere.
+	formAction string
+}
+
+// renderPage writes an HTML page. Rendering into a buffer first means a
+// failure halfway through cannot emit a half-written page under a 200.
+func (p *Provider) renderPage(w http.ResponseWriter, r *http.Request, page string, status int, data pageData) {
+	tmpl, ok := p.pages[page]
+	if !ok {
+		p.logger.ErrorContext(r.Context(), "unknown template", "page", page)
+		http.Error(w, "template not found", http.StatusInternalServerError)
+		return
+	}
+	data.Stylesheet = p.path(web.StaticPath) + web.StylesheetFile
+	data.CSRFField = web.CSRFFieldName
+
+	var buf bytes.Buffer
+	if err := tmpl.ExecuteTemplate(&buf, "layout", data); err != nil {
+		p.logger.ErrorContext(r.Context(), "render template", "page", page, "err", err)
+		http.Error(w, "could not render the page", http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	w.Header().Set("X-Frame-Options", "DENY")
+	w.Header().Set("Referrer-Policy", "no-referrer")
+	// form-action is scoped per page. The login form's response is a redirect
+	// to the client's registered URI, and WebKit enforces form-action across
+	// redirects that follow a form submission — a bare 'self' would break
+	// sign-in in Safari at the final hop while working elsewhere.
+	formAction := "'none'"
+	if data.formAction != "" {
+		formAction = data.formAction
+	}
+	w.Header().Set("Content-Security-Policy",
+		"default-src 'none'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; "+
+			"form-action "+formAction+"; frame-ancestors 'none'; base-uri 'none'")
+	w.Header().Set("Cache-Control", "no-store")
+
+	w.WriteHeader(status)
+	if _, err := buf.WriteTo(w); err != nil {
+		p.logger.ErrorContext(r.Context(), "write response", "page", page, "err", err)
+	}
+}
+
+// refuse reports a problem to the person in front of the browser without
+// sending anything to the client application. It is used for exactly the cases
+// where the request cannot be shown to belong to a registered client.
+func (p *Provider) refuse(w http.ResponseWriter, r *http.Request, title, message, detail string) {
+	p.refuseStatus(w, r, http.StatusBadRequest, title, message, detail)
+}
+
+// refuseStatus is refuse with an explicit status, so an internal fault is not
+// reported as a client error — a proxy or uptime check reading a 400 would
+// treat a database outage as permanent and never retry or alarm.
+func (p *Provider) refuseStatus(w http.ResponseWriter, r *http.Request, status int, title, message, detail string) {
+	p.renderPage(w, r, "error", status, pageData{
+		Title:   title,
+		Message: message,
+		Detail:  detail,
+	})
 }
 
 // Register wires the provider's endpoints onto mux. The method is part of each
@@ -55,6 +237,14 @@ func (p *Provider) WithLogger(l *slog.Logger) *Provider {
 func (p *Provider) Register(mux *http.ServeMux) {
 	mux.HandleFunc("GET "+p.path(DiscoveryPath), p.handleDiscovery)
 	mux.HandleFunc("GET "+p.path(JWKSPath), p.handleJWKS)
+	mux.HandleFunc("GET "+p.path(AuthorizePath), p.handleAuthorize)
+	mux.HandleFunc("POST "+p.path(AuthorizePath), p.handleLogin)
+
+	// Serve the shared assets under the issuer's path too, so a proxy
+	// forwarding only that prefix still reaches the login page's stylesheet.
+	if prefix := p.path(web.StaticPath); prefix != web.StaticPath {
+		web.RegisterAt(mux, prefix)
+	}
 }
 
 // base is the issuer with any trailing slash removed, so joining a path cannot

@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/Ryback2501/Clerk/internal/keys"
+	"github.com/Ryback2501/Clerk/internal/store"
 )
 
 func newTestProvider(t *testing.T, issuer string) (*Provider, *keys.Signer) {
@@ -18,11 +19,22 @@ func newTestProvider(t *testing.T, issuer string) (*Provider, *keys.Signer) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	signer, err := keys.LoadOrGenerate(filepath.Join(t.TempDir(), "signing.pem"))
+	dir := t.TempDir()
+	signer, err := keys.LoadOrGenerate(filepath.Join(dir, "signing.pem"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	return New(u, signer), signer
+	s, err := store.Open(filepath.Join(dir, "clerk.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+
+	p, err := New(Options{Issuer: u, Signer: signer, Store: s})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return p, signer
 }
 
 func get(t *testing.T, p *Provider, path string) *httptest.ResponseRecorder {

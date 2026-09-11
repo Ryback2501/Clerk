@@ -16,7 +16,7 @@ func (h *Handler) newPageData(w http.ResponseWriter, r *http.Request, admin *adm
 		Title:     title,
 		Admin:     admin,
 		Insecure:  h.insecure,
-		CSRFToken: h.csrf.issue(w, r),
+		CSRFToken: h.csrf.Issue(w, r),
 	}
 }
 

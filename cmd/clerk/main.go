@@ -23,6 +23,7 @@ import (
 	"github.com/Ryback2501/Clerk/internal/keys"
 	"github.com/Ryback2501/Clerk/internal/oidc"
 	"github.com/Ryback2501/Clerk/internal/store"
+	"github.com/Ryback2501/Clerk/internal/web"
 )
 
 // Shutdown budget for in-flight requests once a signal arrives.
@@ -56,7 +57,16 @@ func run(logger *slog.Logger) error {
 	// The key id is safe to log; the key itself never is.
 	logger.Info("signing key ready", "kid", signer.KeyID(), "path", cfg.KeysPath)
 
-	provider := oidc.New(cfg.Issuer, signer).WithLogger(logger)
+	provider, err := oidc.New(oidc.Options{
+		Issuer:  cfg.Issuer,
+		Signer:  signer,
+		Store:   db,
+		CodeTTL: cfg.CodeTTL,
+		Logger:  logger,
+	})
+	if err != nil {
+		return fmt.Errorf("oidc provider: %w", err)
+	}
 
 	// Admin authentication is not implemented yet, so the only authenticator
 	// available authorises everyone. Refuse to start in that state unless the
@@ -86,6 +96,11 @@ func run(logger *slog.Logger) error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
+	// Expired authorization requests and codes are useless but not harmless:
+	// left alone they grow the database without bound. Reclaiming them is
+	// background work, so a failure is logged rather than fatal.
+	go purgeExpired(ctx, db, logger)
+
 	errCh := make(chan error, 1)
 	go func() {
 		logger.Info("listening", "addr", cfg.ListenAddr, "issuer", cfg.Issuer.String())
@@ -109,6 +124,27 @@ func run(logger *slog.Logger) error {
 	return nil
 }
 
+// purgeInterval is how often expired authorization state is reclaimed. The
+// rows are small and short-lived, so this does not need to be frequent.
+const purgeInterval = 10 * time.Minute
+
+// purgeExpired reclaims timed-out authorization state until ctx is cancelled.
+func purgeExpired(ctx context.Context, db *store.Store, logger *slog.Logger) {
+	ticker := time.NewTicker(purgeInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			if err := db.PurgeExpired(ctx); err != nil && ctx.Err() == nil {
+				logger.Error("purge expired authorization state", "err", err)
+			}
+		}
+	}
+}
+
 // newHandler builds the HTTP routes. The provider and the admin interface are
 // registered independently so that an admin-side failure cannot affect token
 // issuance.
@@ -116,6 +152,7 @@ func newHandler(provider *oidc.Provider, adminHandler *admin.Handler) http.Handl
 	mux := http.NewServeMux()
 	provider.Register(mux)
 	adminHandler.Register(mux)
+	web.Register(mux)
 	mux.HandleFunc("GET /health", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
