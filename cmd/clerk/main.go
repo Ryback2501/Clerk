@@ -32,6 +32,15 @@ const shutdownTimeout = 10 * time.Second
 func main() {
 	logger := slog.New(slog.NewJSONHandler(os.Stderr, nil))
 
+	// The container healthcheck runs this same binary, because the runtime
+	// image is distroless and has neither a shell nor curl.
+	if healthcheckRequested(os.Args[1:]) {
+		if err := runHealthcheck(os.Getenv("CLERK_LISTEN_ADDR")); err != nil {
+			exitUnhealthy(err)
+		}
+		return
+	}
+
 	if err := run(logger); err != nil {
 		logger.Error("fatal", "err", err)
 		os.Exit(1)

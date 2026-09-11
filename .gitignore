@@ -10,6 +10,9 @@
 *.db
 *.db-shm
 *.db-wal
+
+# Private key material. The keys directory above is already ignored; this is
+# the backstop against one being generated anywhere else in the tree.
 *.pem
 
 # Local environment
@@ -19,3 +22,8 @@
 # Test output
 coverage.out
 *.test
+
+# End-to-end suite
+/e2e/node_modules/
+/e2e/test-results/
+/e2e/playwright-report/
