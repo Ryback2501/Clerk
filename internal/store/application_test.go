@@ -289,3 +289,79 @@ func TestDeleteUnknownApplicationIsNotFound(t *testing.T) {
 		t.Errorf("got %v, want ErrNotFound", err)
 	}
 }
+
+// Callers must be able to tell "the administrator typed something wrong" from
+// "the database is broken": the first is a 422 with the message shown, the
+// second a 500 with the detail kept in the log.
+func TestValidationFailuresAreDistinguishableFromInternalErrors(t *testing.T) {
+	s := openTemp(t)
+
+	for _, tc := range []struct {
+		name string
+		run  func() error
+	}{
+		{"empty application name", func() error {
+			_, _, err := s.CreateApplication(ctx(), "", nil)
+			return err
+		}},
+		{"malformed redirect uri", func() error {
+			_, _, err := s.CreateApplication(ctx(), "App", []string{"nope"})
+			return err
+		}},
+		{"non-http redirect uri on add", func() error {
+			app, _ := createApp(t, s, "App2")
+			return s.AddRedirectURI(ctx(), app.ID, "javascript:alert(1)")
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			err := tc.run()
+			if err == nil {
+				t.Fatal("expected an error")
+			}
+			if !errors.Is(err, ErrValidation) {
+				t.Errorf("error %v is not marked as a validation failure", err)
+			}
+		})
+	}
+}
+
+// Pasting the same URI twice into the form is an obvious typo, not a reason to
+// reject the whole registration with a constraint violation.
+func TestCreateApplicationTolueratesRepeatedRedirectURIs(t *testing.T) {
+	s := openTemp(t)
+
+	app, _, err := s.CreateApplication(ctx(), "App", []string{
+		"https://a.example.com/cb",
+		"https://a.example.com/cb",
+		"https://b.example.com/cb",
+	})
+	if err != nil {
+		t.Fatalf("CreateApplication() rejected a repeated redirect URI: %v", err)
+	}
+	if len(app.RedirectURIs) != 2 {
+		t.Errorf("got %d redirect URIs, want the 2 distinct ones: %v", len(app.RedirectURIs), app.RedirectURIs)
+	}
+}
+
+func TestCountUsers(t *testing.T) {
+	s := openTemp(t)
+	app, _ := createApp(t, s, "App")
+	other, _ := createApp(t, s, "Other")
+
+	for i, name := range []string{"a", "b", "c"} {
+		if err := insertUser(t, s, app.ID, name, "sub-"+name+string(rune('0'+i))); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := insertUser(t, s, other.ID, "z", "sub-z"); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := s.CountUsers(ctx(), app.ID)
+	if err != nil {
+		t.Fatalf("CountUsers() error: %v", err)
+	}
+	if got != 3 {
+		t.Errorf("CountUsers() = %d, want 3", got)
+	}
+}

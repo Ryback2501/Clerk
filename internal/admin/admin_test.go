@@ -379,21 +379,37 @@ func seedUsers(t *testing.T, h *harness, appID int64, n int) {
 
 func itoa(i int64) string { return strconv.FormatInt(i, 10) }
 
-// The one-time secret must appear only on the application it belongs to.
+// The one-time secret must appear only on the application it belongs to. The
+// invariant is about the secret's value, not about whether a page renders the
+// panel: each application has its own pending reveal, and both are legitimate.
 func TestRevealedSecretDoesNotLeakOntoAnotherApplication(t *testing.T) {
 	h := newHarness(t)
 	first := h.createApp("First", "https://a.example.com/cb")
 	second := h.createApp("Second", "https://b.example.com/cb")
 
-	// Creating "Second" left a pending reveal. Viewing "First" must not show it.
-	body := h.get("/admin/applications/" + itoa(first)).Body.String()
-	if strings.Contains(body, "Copy it now") {
-		t.Error("another application's secret was displayed on this page")
+	firstSecret := extractSecret(t, h.get("/admin/applications/"+itoa(first)).Body.String())
+	if firstSecret == "" {
+		t.Fatal("the first application's secret was never displayed")
 	}
 
-	// It is still available where it belongs.
-	if !strings.Contains(h.get("/admin/applications/"+itoa(second)).Body.String(), "Copy it now") {
-		t.Error("the secret was not shown on the application it was generated for")
+	secondPage := h.get("/admin/applications/" + itoa(second)).Body.String()
+	if strings.Contains(secondPage, firstSecret) {
+		t.Error("one application's secret was rendered on another application's page")
+	}
+
+	secondSecret := extractSecret(t, secondPage)
+	if secondSecret == "" {
+		t.Fatal("the second application's secret was never displayed")
+	}
+	if secondSecret == firstSecret {
+		t.Error("both applications were issued the same secret")
+	}
+
+	// Each is still single-use.
+	for _, id := range []int64{first, second} {
+		if strings.Contains(h.get("/admin/applications/"+itoa(id)).Body.String(), "Copy it now") {
+			t.Errorf("application %d showed its secret a second time", id)
+		}
 	}
 }
 
@@ -406,5 +422,74 @@ func TestPageDoesNotPinTheColourTheme(t *testing.T) {
 
 	if strings.Contains(body, "data-theme") {
 		t.Error("the page sets data-theme, which disables Pico's automatic dark mode")
+	}
+}
+
+// Two secrets generated before either is viewed must both remain reachable.
+// A single cookie slot would let the second overwrite the first, leaving an
+// application whose old secret is already invalidated and whose new one can
+// never be displayed.
+func TestTwoPendingSecretsAreBothReachable(t *testing.T) {
+	h := newHarness(t)
+	first := h.createApp("First", "https://a.example.com/cb")
+	second := h.createApp("Second", "https://b.example.com/cb")
+
+	// Regenerate both before viewing either.
+	for _, id := range []int64{first, second} {
+		if rec := h.post("/admin/applications/"+itoa(id)+"/secret", url.Values{}); rec.Code != http.StatusSeeOther {
+			t.Fatalf("regenerate for %d returned %d", id, rec.Code)
+		}
+	}
+
+	for _, id := range []int64{first, second} {
+		body := h.get("/admin/applications/" + itoa(id)).Body.String()
+		shown := extractSecret(t, body)
+		if shown == "" {
+			t.Errorf("application %d: the regenerated secret was not displayed", id)
+			continue
+		}
+		ok, err := h.store.VerifyClientSecret(context.Background(), id, shown)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !ok {
+			t.Errorf("application %d: the displayed secret does not match the stored hash", id)
+		}
+	}
+}
+
+// Infrastructure failures must not be shown to the administrator as if they
+// were their own input mistake.
+func TestInternalFailureIsNotReportedAsValidation(t *testing.T) {
+	h := newHarness(t)
+	id := h.createApp("App", "https://a.example.com/cb")
+
+	// Closing the database makes every subsequent query fail.
+	if err := h.store.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	rec := h.get("/admin/applications/" + itoa(id))
+	if rec.Code != http.StatusInternalServerError {
+		t.Errorf("a database failure returned %d, want 500", rec.Code)
+	}
+	if strings.Contains(rec.Body.String(), "sql:") || strings.Contains(rec.Body.String(), "database is closed") {
+		t.Error("the raw database error was shown in the browser")
+	}
+}
+
+func TestAdminTrailingSlashReachesTheInterface(t *testing.T) {
+	h := newHarness(t)
+	rec := h.get("/admin/")
+	if rec.Code != http.StatusOK && rec.Code != http.StatusMovedPermanently {
+		t.Errorf("GET /admin/ = %d, want the interface or a redirect to it", rec.Code)
+	}
+}
+
+func TestStaticDirectoryIsNotBrowsable(t *testing.T) {
+	h := newHarness(t)
+	rec := h.get("/admin/static/")
+	if rec.Code == http.StatusOK && strings.Contains(rec.Body.String(), "pico.min.css") {
+		t.Error("the static directory returns a browsable index of its contents")
 	}
 }

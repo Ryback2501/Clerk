@@ -58,9 +58,17 @@ func run(logger *slog.Logger) error {
 
 	provider := oidc.New(cfg.Issuer, signer).WithLogger(logger)
 
-	// Admin authentication is not implemented yet, so the interface is open.
-	// Say so loudly rather than letting it be discovered.
+	// Admin authentication is not implemented yet, so the only authenticator
+	// available authorises everyone. Refuse to start in that state unless the
+	// operator has explicitly asked for it: otherwise every image built from
+	// this source would quietly expose application creation, secret
+	// regeneration and deletion to anyone who can reach the port.
+	if !cfg.AdminInsecure {
+		return errors.New("administration has no authentication in this build: " +
+			"set CLERK_ADMIN_INSECURE=true to run anyway, and do not expose the port to an untrusted network")
+	}
 	logger.Warn(adminauth.Warning)
+
 	adminHandler, err := admin.New(db, adminauth.AllowAll{}, true)
 	if err != nil {
 		return fmt.Errorf("admin interface: %w", err)

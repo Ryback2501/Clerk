@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"fmt"
 	"net/http"
+	"strconv"
 
 	"github.com/Ryback2501/Clerk/internal/adminauth"
 )
@@ -79,6 +80,16 @@ func (h *Handler) internalError(w http.ResponseWriter, r *http.Request, admin *a
 		"The request could not be completed. Check the server logs for details.")
 }
 
+// revealCookie names the cookie carrying the reveal token for one application.
+//
+// The name is per-application on purpose. A single shared cookie has only one
+// slot, so generating a second secret before viewing the first would overwrite
+// its token — leaving an application whose previous secret is already
+// invalidated and whose new one could never be displayed.
+func revealCookie(applicationID int64) string {
+	return revealCookiePrefix + strconv.FormatInt(applicationID, 10)
+}
+
 // revealOnce stashes a freshly generated secret and hands the browser the
 // single-use token that displays it.
 func (h *Handler) revealOnce(w http.ResponseWriter, applicationID int64, plainSecret string) {
@@ -87,7 +98,7 @@ func (h *Handler) revealOnce(w http.ResponseWriter, applicationID int64, plainSe
 		return
 	}
 	http.SetCookie(w, &http.Cookie{
-		Name:     revealCookieName,
+		Name:     revealCookie(applicationID),
 		Value:    token,
 		Path:     "/admin",
 		HttpOnly: true,
@@ -99,25 +110,27 @@ func (h *Handler) revealOnce(w http.ResponseWriter, applicationID int64, plainSe
 // takeRevealed consumes the reveal token, if the request carries one, and
 // clears the cookie so a reload cannot show the secret again.
 func (h *Handler) takeRevealed(w http.ResponseWriter, r *http.Request, applicationID int64) string {
-	cookie, err := r.Cookie(revealCookieName)
+	name := revealCookie(applicationID)
+
+	cookie, err := r.Cookie(name)
 	if err != nil || cookie.Value == "" {
 		return ""
 	}
 
-	plain, ok := h.reveal.take(cookie.Value, applicationID)
-	if !ok {
-		// Leave the cookie in place: the secret may still belong to another
-		// application the administrator has not visited yet.
-		return ""
-	}
-
+	// Clear it either way: this cookie belongs to this application alone, so
+	// once it has been presented there is nothing further it can unlock.
 	http.SetCookie(w, &http.Cookie{
-		Name:     revealCookieName,
+		Name:     name,
 		Value:    "",
 		Path:     "/admin",
 		HttpOnly: true,
 		SameSite: http.SameSiteLaxMode,
 		MaxAge:   -1,
 	})
+
+	plain, ok := h.reveal.take(cookie.Value, applicationID)
+	if !ok {
+		return ""
+	}
 	return plain
 }

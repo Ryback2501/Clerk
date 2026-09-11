@@ -17,6 +17,16 @@ var ErrNotFound = errors.New("not found")
 // ErrDuplicate is returned when a row would violate a uniqueness rule.
 var ErrDuplicate = errors.New("already exists")
 
+// ErrValidation marks an error caused by what the caller supplied, as opposed
+// to a failure of the database or the runtime. Callers use it to decide between
+// showing the message to the administrator and logging it as an internal fault.
+var ErrValidation = errors.New("invalid input")
+
+// invalidf builds a validation error carrying ErrValidation.
+func invalidf(format string, args ...any) error {
+	return fmt.Errorf("%w: "+format, append([]any{ErrValidation}, args...)...)
+}
+
 // Application is an OIDC client registered with this provider.
 //
 // It deliberately carries no secret material: the client secret exists in
@@ -36,13 +46,16 @@ type Application struct {
 func (s *Store) CreateApplication(ctx context.Context, name string, redirectURIs []string) (*Application, string, error) {
 	name = strings.TrimSpace(name)
 	if name == "" {
-		return nil, "", errors.New("application name must not be empty")
+		return nil, "", invalidf("application name must not be empty")
 	}
 	for _, uri := range redirectURIs {
 		if err := ValidateRedirectURI(uri); err != nil {
 			return nil, "", err
 		}
 	}
+	// The same URI listed twice is a typo, not a reason to reject the whole
+	// registration on a uniqueness constraint.
+	redirectURIs = dedupe(redirectURIs)
 
 	clientID, err := secret.NewClientID()
 	if err != nil {
@@ -226,9 +239,34 @@ func (s *Store) AddRedirectURI(ctx context.Context, appID int64, uri string) err
 		return fmt.Errorf("insert redirect uri: %w", err)
 	}
 	if n == 0 {
-		return fmt.Errorf("redirect uri %q: %w", uri, ErrDuplicate)
+		return invalidf("redirect uri %q is already registered", uri)
 	}
 	return nil
+}
+
+// CountUsers reports how many test users belong to an application. It lives
+// here so that knowledge of the users table stays in one package.
+func (s *Store) CountUsers(ctx context.Context, appID int64) (int, error) {
+	var n int
+	if err := s.db.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM users WHERE application_id = ?`, appID).Scan(&n); err != nil {
+		return 0, fmt.Errorf("count users: %w", err)
+	}
+	return n, nil
+}
+
+// dedupe removes repeated entries while preserving the order given.
+func dedupe(values []string) []string {
+	seen := make(map[string]bool, len(values))
+	out := values[:0:0]
+	for _, v := range values {
+		if seen[v] {
+			continue
+		}
+		seen[v] = true
+		out = append(out, v)
+	}
+	return out
 }
 
 // RemoveRedirectURI unregisters a redirect URI from a client.
@@ -269,22 +307,22 @@ func expectOneRow(res sql.Result, what string) error {
 // simple.
 func ValidateRedirectURI(raw string) error {
 	if strings.TrimSpace(raw) == "" {
-		return errors.New("redirect uri must not be empty")
+		return invalidf("redirect uri must not be empty")
 	}
 
 	u, err := url.Parse(raw)
 	if err != nil {
-		return fmt.Errorf("redirect uri %q is not a valid URL: %w", raw, err)
+		return invalidf("redirect uri %q is not a valid URL: %s", raw, err)
 	}
 	switch {
 	case !u.IsAbs():
-		return fmt.Errorf("redirect uri %q must be absolute", raw)
+		return invalidf("redirect uri %q must be absolute", raw)
 	case u.Scheme != "http" && u.Scheme != "https":
-		return fmt.Errorf("redirect uri %q must use http or https, got %q", raw, u.Scheme)
+		return invalidf("redirect uri %q must use http or https, got %q", raw, u.Scheme)
 	case u.Host == "":
-		return fmt.Errorf("redirect uri %q must include a host", raw)
+		return invalidf("redirect uri %q must include a host", raw)
 	case u.Fragment != "" || strings.Contains(raw, "#"):
-		return fmt.Errorf("redirect uri %q must not contain a fragment", raw)
+		return invalidf("redirect uri %q must not contain a fragment", raw)
 	}
 	return nil
 }

@@ -60,10 +60,14 @@ func (h *Handler) createApplication(w http.ResponseWriter, r *http.Request, admi
 
 	app, plainSecret, err := h.store.CreateApplication(r.Context(), form.Name, splitURIs(form.RedirectURIs))
 	if err != nil {
-		// Validation failures are the administrator's to fix, so the message is
-		// shown and the form is returned populated.
+		// Only the administrator's own mistakes are theirs to see. Anything
+		// else is an internal fault: it belongs in the log, under a 500.
+		if !errors.Is(err, store.ErrValidation) {
+			h.internalError(w, r, admin, "create application", err)
+			return
+		}
 		data := h.newPageData(w, r, admin, "Register an application")
-		data.Error = err.Error()
+		data.Error = validationMessage(err)
 		data.Form = form
 		h.render(w, r, "application_new", http.StatusUnprocessableEntity, data)
 		return
@@ -144,9 +148,8 @@ func (h *Handler) confirmDeleteApplication(w http.ResponseWriter, r *http.Reques
 
 	// The count is shown so the administrator sees exactly how much is about to
 	// be destroyed, rather than a generic warning.
-	var users int
-	if err := h.store.DB().QueryRowContext(r.Context(),
-		`SELECT COUNT(*) FROM users WHERE application_id = ?`, app.ID).Scan(&users); err != nil {
+	users, err := h.store.CountUsers(r.Context(), app.ID)
+	if err != nil {
 		h.internalError(w, r, admin, "count users", err)
 		return
 	}
@@ -195,7 +198,13 @@ func (h *Handler) lookupApplication(w http.ResponseWriter, r *http.Request, admi
 }
 
 // redisplayApplication re-renders the detail page carrying a validation error.
+// A cause that is not a validation failure is an internal fault instead.
 func (h *Handler) redisplayApplication(w http.ResponseWriter, r *http.Request, admin *adminauth.Admin, id int64, cause error) {
+	if !errors.Is(cause, store.ErrValidation) && !errors.Is(cause, store.ErrNotFound) {
+		h.internalError(w, r, admin, "update redirect uris", cause)
+		return
+	}
+
 	app, err := h.store.GetApplication(r.Context(), id)
 	if err != nil {
 		h.internalError(w, r, admin, "load application", err)
@@ -204,8 +213,15 @@ func (h *Handler) redisplayApplication(w http.ResponseWriter, r *http.Request, a
 
 	data := h.newPageData(w, r, admin, app.Name)
 	data.Application = app
-	data.Error = cause.Error()
+	data.Error = validationMessage(cause)
 	h.render(w, r, "application", http.StatusUnprocessableEntity, data)
+}
+
+// validationMessage strips the sentinel prefix so the administrator reads the
+// problem rather than the plumbing.
+func validationMessage(err error) string {
+	msg := err.Error()
+	return strings.TrimPrefix(msg, store.ErrValidation.Error()+": ")
 }
 
 // splitURIs turns the textarea's one-per-line input into a list.

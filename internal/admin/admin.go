@@ -26,9 +26,10 @@ var templateFS embed.FS
 //go:embed all:static
 var staticFS embed.FS
 
-// revealCookieName carries the single-use token that reveals a freshly
-// generated client secret exactly once.
-const revealCookieName = "clerk_reveal"
+// revealCookiePrefix begins the name of the cookie carrying the single-use
+// token that reveals a freshly generated client secret. The application id is
+// appended, so each application has its own slot.
+const revealCookiePrefix = "clerk_reveal_"
 
 // Handler serves the admin interface.
 type Handler struct {
@@ -104,9 +105,16 @@ func (h *Handler) Register(mux *http.ServeMux) {
 		// built binary.
 		panic(fmt.Sprintf("admin: embedded static assets unavailable: %v", err))
 	}
-	mux.Handle("GET /admin/static/", http.StripPrefix("/admin/static/", http.FileServer(http.FS(static))))
+	// noDirFS keeps http.FileServer from serving a browsable index of whatever
+	// ends up in the embedded asset tree.
+	mux.Handle("GET /admin/static/", http.StripPrefix("/admin/static/", http.FileServer(http.FS(noDirFS{static}))))
 
 	mux.HandleFunc("GET /admin", h.guard(h.listApplications))
+	// ServeMux only synthesises /x -> /x/, never the reverse, so the
+	// trailing-slash form has to be registered explicitly.
+	mux.HandleFunc("GET /admin/{$}", func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, "/admin", http.StatusMovedPermanently)
+	})
 	mux.HandleFunc("GET /admin/applications/new", h.guard(h.newApplicationForm))
 	mux.HandleFunc("POST /admin/applications", h.guardWrite(h.createApplication))
 	mux.HandleFunc("GET /admin/applications/{id}", h.guard(h.showApplication))
@@ -167,4 +175,25 @@ func (h *Handler) denied(w http.ResponseWriter, r *http.Request, err error) {
 		h.renderError(w, r, nil, http.StatusInternalServerError, "Something went wrong",
 			"The request could not be completed.")
 	}
+}
+
+// noDirFS is an fs.FS that refuses to open directories, so a file server built
+// on it cannot list their contents.
+type noDirFS struct{ fs.FS }
+
+func (f noDirFS) Open(name string) (fs.File, error) {
+	file, err := f.FS.Open(name)
+	if err != nil {
+		return nil, err
+	}
+	info, err := file.Stat()
+	if err != nil {
+		_ = file.Close()
+		return nil, err
+	}
+	if info.IsDir() {
+		_ = file.Close()
+		return nil, fs.ErrNotExist
+	}
+	return file, nil
 }

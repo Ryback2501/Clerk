@@ -36,6 +36,14 @@ jobs:
             exit 1
           fi
           go vet ./...
+      - name: go.mod and go.sum are tidy
+        run: |
+          go mod tidy
+          if ! git diff --quiet -- go.mod go.sum; then
+            echo "::error::go mod tidy changed go.mod/go.sum; commit the result"
+            git diff -- go.mod go.sum
+            exit 1
+          fi
 
   unit:
     name: unit
@@ -94,6 +102,7 @@ jobs:
         run: |
           docker run -d --name clerk \
             -e CLERK_ISSUER=http://localhost:8080 \
+            -e CLERK_ADMIN_INSECURE=true \
             -p 8080:8080 clerk:ci
       - name: Healthcheck
         run: |
