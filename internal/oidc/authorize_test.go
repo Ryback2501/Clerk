@@ -24,6 +24,8 @@ type flow struct {
 	user     *store.User
 	jar      map[string]string
 	basePath string
+	secret   string
+	signer   *keys.Signer
 }
 
 const testRedirect = "https://app.example.com/cb"
@@ -54,7 +56,8 @@ func newFlowWithIssuer(t *testing.T, issuerURL string) *flow {
 		t.Fatal(err)
 	}
 
-	app, _, err := s.CreateApplication(context.Background(), "My Test Application", []string{testRedirect})
+	app, appSecret, err := s.CreateApplication(context.Background(), "My Test Application",
+		[]string{testRedirect, "https://app.example.com/other"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -69,6 +72,8 @@ func newFlowWithIssuer(t *testing.T, issuerURL string) *flow {
 		t: t, mux: mux, store: s, app: app, user: user,
 		jar:      map[string]string{},
 		basePath: strings.TrimRight(issuer.Path, "/"),
+		secret:   appSecret,
+		signer:   signer,
 	}
 }
 

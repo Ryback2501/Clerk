@@ -276,3 +276,81 @@ func TestPurgeExpiredRemovesOnlyWhatIsPastItsLifetime(t *testing.T) {
 		}
 	}
 }
+
+func TestAccessTokenIsStoredHashedAndResolves(t *testing.T) {
+	s := openTemp(t)
+	app, _ := createApp(t, s, "App", "https://app.example.com/cb")
+	user := mustCreateUser(t, s, app.ID, "david")
+
+	plain, err := s.IssueAccessToken(ctx(), app.ID, user.ID, "openid profile", time.Hour)
+	if err != nil {
+		t.Fatalf("IssueAccessToken() error: %v", err)
+	}
+	if len(plain) < 40 {
+		t.Errorf("access token %q carries too little entropy", plain)
+	}
+
+	var stored string
+	if err := s.DB().QueryRow(`SELECT token_hash FROM access_tokens`).Scan(&stored); err != nil {
+		t.Fatal(err)
+	}
+	if stored == plain {
+		t.Fatal("the access token is stored in plaintext")
+	}
+
+	got, err := s.LookupAccessToken(ctx(), plain)
+	if err != nil {
+		t.Fatalf("LookupAccessToken() error: %v", err)
+	}
+	if got.UserID != user.ID || got.ApplicationID != app.ID {
+		t.Errorf("token resolved to user %d of app %d, want %d/%d",
+			got.UserID, got.ApplicationID, user.ID, app.ID)
+	}
+	if got.Scope != "openid profile" {
+		t.Errorf("scope = %q, want it preserved", got.Scope)
+	}
+}
+
+func TestExpiredAccessTokenIsRejected(t *testing.T) {
+	s := openTemp(t)
+	app, _ := createApp(t, s, "App", "https://app.example.com/cb")
+	user := mustCreateUser(t, s, app.ID, "david")
+
+	start := time.Unix(1_000_000, 0)
+	s.now = fixedClock(start)
+	plain, err := s.IssueAccessToken(ctx(), app.ID, user.ID, "openid", time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	s.now = fixedClock(start.Add(time.Hour + time.Second))
+	if _, err := s.LookupAccessToken(ctx(), plain); !errors.Is(err, ErrNotFound) {
+		t.Error("an expired access token was accepted")
+	}
+}
+
+func TestUnknownAccessTokenIsRejected(t *testing.T) {
+	s := openTemp(t)
+	if _, err := s.LookupAccessToken(ctx(), "never-issued"); !errors.Is(err, ErrNotFound) {
+		t.Errorf("got %v, want ErrNotFound", err)
+	}
+}
+
+// Deleting a user must invalidate their tokens, not leave them resolving to a
+// row that no longer exists.
+func TestAccessTokensCascadeWithTheirUser(t *testing.T) {
+	s := openTemp(t)
+	app, _ := createApp(t, s, "App", "https://app.example.com/cb")
+	user := mustCreateUser(t, s, app.ID, "david")
+
+	plain, err := s.IssueAccessToken(ctx(), app.ID, user.ID, "openid", time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.DeleteUser(ctx(), user.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.LookupAccessToken(ctx(), plain); !errors.Is(err, ErrNotFound) {
+		t.Error("an access token outlived the user it identified")
+	}
+}

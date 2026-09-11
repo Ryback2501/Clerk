@@ -36,6 +36,9 @@ const (
 
 	// DefaultAuthRequestTTL bounds how long a rendered login page stays valid.
 	DefaultAuthRequestTTL = 15 * time.Minute
+
+	// DefaultTokenTTL is the fallback lifetime for access and ID tokens.
+	DefaultTokenTTL = time.Hour
 )
 
 // Endpoint paths, relative to the issuer.
@@ -58,9 +61,11 @@ type Options struct {
 	// Store is the database the provider reads clients and users from.
 	Store *store.Store
 
-	// CodeTTL and AuthRequestTTL default when left zero.
+	// Lifetimes; each defaults when left zero.
 	CodeTTL        time.Duration
 	AuthRequestTTL time.Duration
+	AccessTokenTTL time.Duration
+	IDTokenTTL     time.Duration
 
 	// Logger defaults to the package-level logger.
 	Logger *slog.Logger
@@ -78,6 +83,11 @@ type Provider struct {
 
 	codeTTL        time.Duration
 	authRequestTTL time.Duration
+	accessTokenTTL time.Duration
+	idTokenTTL     time.Duration
+
+	// now is injectable so token lifetimes can be tested without sleeping.
+	now func() time.Time
 }
 
 // New builds a Provider.
@@ -105,6 +115,9 @@ func New(opts Options) (*Provider, error) {
 		pages:          pages,
 		codeTTL:        opts.CodeTTL,
 		authRequestTTL: opts.AuthRequestTTL,
+		accessTokenTTL: opts.AccessTokenTTL,
+		idTokenTTL:     opts.IDTokenTTL,
+		now:            time.Now,
 	}
 	if p.logger == nil {
 		p.logger = slog.Default()
@@ -114,6 +127,12 @@ func New(opts Options) (*Provider, error) {
 	}
 	if p.authRequestTTL == 0 {
 		p.authRequestTTL = DefaultAuthRequestTTL
+	}
+	if p.accessTokenTTL == 0 {
+		p.accessTokenTTL = DefaultTokenTTL
+	}
+	if p.idTokenTTL == 0 {
+		p.idTokenTTL = DefaultTokenTTL
 	}
 	return p, nil
 }
@@ -239,6 +258,7 @@ func (p *Provider) Register(mux *http.ServeMux) {
 	mux.HandleFunc("GET "+p.path(JWKSPath), p.handleJWKS)
 	mux.HandleFunc("GET "+p.path(AuthorizePath), p.handleAuthorize)
 	mux.HandleFunc("POST "+p.path(AuthorizePath), p.handleLogin)
+	mux.HandleFunc("POST "+p.path(TokenPath), p.handleToken)
 
 	// Serve the shared assets under the issuer's path too, so a proxy
 	// forwarding only that prefix still reaches the login page's stylesheet.
