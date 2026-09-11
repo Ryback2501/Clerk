@@ -79,8 +79,10 @@ func (p *Provider) handleToken(w http.ResponseWriter, r *http.Request) {
 	case errors.Is(err, store.ErrCodeReplayed):
 		// Worth a louder line than the others: a second presentation of a code
 		// suggests it was captured somewhere.
+		// granted is nil on this path — the store reports the replay without
+		// returning the code's contents, so only the presenting client is known.
 		p.logger.WarnContext(r.Context(), "authorization code replayed",
-			"application_id", app.ID, "issued_to_application_id", granted)
+			"presented_by_application_id", app.ID)
 		p.tokenError(w, r, http.StatusBadRequest, errInvalidGrant, "the authorization code has already been used")
 		return
 	case err != nil:
