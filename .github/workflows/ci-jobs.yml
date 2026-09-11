@@ -2,10 +2,6 @@ name: CI jobs
 
 # Reusable CI. Called by pr-work-to-dev.yml and pr-dev-to-main.yml.
 #
-# The e2e job is intentionally absent: the Playwright suite arrives with the UI it
-# drives (implementation slice 8) and lands together with its job and its
-# branch-protection context. A required check that passes vacuously is worse than
-# one that is honestly not there yet.
 
 on:
   workflow_call: {}
@@ -70,6 +66,56 @@ jobs:
           cache: true
       - run: go mod download
       - run: go test ./... -run Integration
+
+  # Drives a real browser through the admin UI and the full authorization code
+  # flow against a running container.
+  e2e:
+    name: e2e
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: e2e/package-lock.json
+      - name: Build the image
+        run: docker build -t clerk:e2e .
+      - name: Start Clerk
+        # Administration is deliberately open here: these tests exercise the
+        # provider, not the sign-in integration, which has its own unit tests.
+        run: |
+          docker run -d --name clerk-e2e \
+            -e CLERK_ISSUER=http://localhost:8080 \
+            -e CLERK_ADMIN_INSECURE=true \
+            -p 8080:8080 clerk:e2e
+          for i in $(seq 1 30); do
+            if curl -fsS http://localhost:8080/health >/dev/null; then exit 0; fi
+            sleep 2
+          done
+          echo "clerk did not become healthy"; docker logs clerk-e2e; exit 1
+      - name: Install the suite
+        working-directory: e2e
+        run: npm ci
+      - name: Install the browser
+        working-directory: e2e
+        run: npx playwright install --with-deps chromium
+      - name: Run
+        working-directory: e2e
+        run: npx playwright test
+      - name: Clerk logs
+        if: failure()
+        run: docker logs clerk-e2e
+      - uses: actions/upload-artifact@v7
+        if: failure()
+        with:
+          name: playwright-traces
+          path: e2e/test-results
+          retention-days: 7
+      - name: Stop Clerk
+        if: always()
+        run: docker rm -f clerk-e2e || true
 
   build:
     name: build

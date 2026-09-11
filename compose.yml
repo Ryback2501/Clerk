@@ -1,0 +1,44 @@
+# Clerk — an OpenID Connect provider for development and testing.
+#
+# This file runs Clerk with administration wide open, which is the quickest way
+# to try it locally. For anything reachable by anyone else, delete
+# CLERK_ADMIN_INSECURE and configure real sign-in instead: see the "Administration
+# access" section of the README.
+
+services:
+  clerk:
+    image: ryback2501/clerk:latest
+    # Use `docker compose up --build` with this uncommented to run local changes:
+    # build: .
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    environment:
+      # Must match what clients are configured with, exactly. It is published as
+      # the issuer and stamped into every ID token.
+      CLERK_ISSUER: http://localhost:8080
+
+      # Administration is unauthenticated in this configuration.
+      CLERK_ADMIN_INSECURE: "true"
+
+      # Real administration instead of the line above:
+      # CLERK_BOUNCER_URL: http://bouncer:3000
+      # CLERK_BOUNCER_API_KEY: bncr_...
+      # CLERK_BOUNCER_REQUIRED_ROLE: admin
+      # CLERK_GOOGLE_CLIENT_ID: ...
+      # CLERK_GOOGLE_CLIENT_SECRET: ...
+    volumes:
+      # Both must persist. Losing the key invalidates every token ever issued;
+      # losing the database loses every registered client and test user.
+      - clerk-data:/data
+      - clerk-keys:/keys
+    healthcheck:
+      test: ["CMD", "/clerk", "-healthcheck"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 5s
+
+volumes:
+  clerk-data:
+  clerk-keys:
