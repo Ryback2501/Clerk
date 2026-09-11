@@ -1,0 +1,160 @@
+name: Release
+
+# Fires on every push to main (i.e. after a dev->main fast-forward). Tags the
+# version, builds & uploads release artifacts, creates the GitHub Release, and —
+# only when the matching repo variable is enabled — publishes a Docker image and/or
+# deploys to a host. Generalized from Mockscii. Build/version surfaces are the only
+# stack-specific bits; publish/deploy stay gated so a fresh repo releases cleanly.
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+  packages: write
+
+jobs:
+  read-version:
+    name: Read version
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.VERSION }}
+    steps:
+      - uses: actions/checkout@v6
+      - id: version
+        run: |
+          VERSION=$(sed 's/^v//' VERSION)
+          if ! printf '%s' "$VERSION" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "error: could not parse a semver version from VERSION"; exit 1
+          fi
+          echo "VERSION=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "Releasing v$VERSION"
+
+  create-tag:
+    name: Create version tag
+    needs: [read-version]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - name: Tag v$VERSION
+        env:
+          VERSION: ${{ needs.read-version.outputs.version }}
+        run: |
+          if git rev-parse "v$VERSION" >/dev/null 2>&1; then
+            echo "Tag v$VERSION already exists — skipping."
+            exit 0
+          fi
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git tag "v$VERSION"
+          git push origin "v$VERSION"
+
+  create-artifacts:
+    name: Build & zip artifacts
+    needs: [read-version]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.27"
+          cache: false
+      - name: Build & zip
+        env:
+          VERSION: ${{ needs.read-version.outputs.version }}
+        run: |
+          go mod download
+          go build -o bin/clerk ./cmd/clerk
+          (cd bin && zip -qr "../clerk-${VERSION}.zip" .)
+      - uses: actions/upload-artifact@v7
+        with:
+          name: release-artifacts
+          path: clerk-*.zip
+          retention-days: 7
+
+  docker-publish:
+    name: Publish image to Docker Hub (gated)
+    needs: [read-version, create-tag]
+    runs-on: ubuntu-latest
+    if: vars.DOCKERHUB_PUBLISH == 'true'
+    steps:
+      - uses: actions/checkout@v6
+      - name: Log in to Docker Hub
+        env:
+          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+        run: echo "$DOCKERHUB_TOKEN" | docker login -u "$DOCKERHUB_USERNAME" --password-stdin
+      - name: Build & push
+        env:
+          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+          VERSION: ${{ needs.read-version.outputs.version }}
+        run: |
+          IMAGE="$DOCKERHUB_USERNAME/clerk"
+          docker build -t "$IMAGE:$VERSION" -t "$IMAGE:latest" .
+          docker push "$IMAGE:$VERSION"
+          docker push "$IMAGE:latest"
+
+  docker-publish-disabled:
+    name: Publish image to Docker Hub (gated — DISABLED)
+    needs: [read-version]
+    runs-on: ubuntu-latest
+    if: vars.DOCKERHUB_PUBLISH != 'true'
+    steps:
+      - run: echo "DOCKERHUB_PUBLISH repo variable is not 'true' — Docker Hub publish skipped."
+
+  github-release:
+    name: GitHub Release
+    needs: [read-version, create-tag, create-artifacts]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/download-artifact@v8
+        with:
+          name: release-artifacts
+      - env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.read-version.outputs.version }}
+        run: |
+          # Empty body — release notes are written by hand on the release page.
+          gh release create "v$VERSION" --title "v$VERSION" --notes "" \
+            "clerk-$VERSION.zip"
+
+  deploy:
+    name: Deploy (prod, gated)
+    needs: [github-release]
+    runs-on: ubuntu-latest
+    if: vars.PAGES_DEPLOY_ENABLED == 'true'
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.27"
+          cache: false
+      - run: "go mod download"
+      - run: "go build -o bin/clerk ./cmd/clerk"
+      - uses: actions/configure-pages@v6
+      - uses: actions/upload-pages-artifact@v5
+        with:
+          path: bin
+      - id: deployment
+        uses: actions/deploy-pages@v5
+
+  deploy-disabled:
+    name: Deploy (prod, gated — DISABLED)
+    needs: [github-release]
+    runs-on: ubuntu-latest
+    if: vars.PAGES_DEPLOY_ENABLED != 'true'
+    steps:
+      - run: echo "PAGES_DEPLOY_ENABLED repo variable is not 'true' — deploy skipped."

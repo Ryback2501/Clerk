@@ -1,0 +1,136 @@
+name: CI jobs
+
+# Reusable CI. Called by pr-work-to-dev.yml and pr-dev-to-main.yml.
+#
+# The e2e job is intentionally absent: the Playwright suite arrives with the UI it
+# drives (implementation slice 8) and lands together with its job and its
+# branch-protection context. A required check that passes vacuously is worse than
+# one that is honestly not there yet.
+
+on:
+  workflow_call: {}
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    name: lint
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.27"
+          # No go.sum yet (the skeleton has zero dependencies) and setup-go keys its
+          # cache off it. Flip to true in slice 1, once real dependencies land.
+          cache: false
+      - run: go mod download
+      - name: gofmt + go vet
+        # `gofmt -l` exits 0 even when it lists unformatted files, so the exit code
+        # cannot be trusted on its own — check the output instead.
+        run: |
+          unformatted=$(gofmt -l .)
+          if [ -n "$unformatted" ]; then
+            echo "::error::gofmt found unformatted files:"
+            echo "$unformatted"
+            exit 1
+          fi
+          go vet ./...
+
+  unit:
+    name: unit
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.27"
+          cache: false
+      - run: go mod download
+      - run: go test ./... -short
+
+  integration:
+    name: integration
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.27"
+          cache: false
+      - run: go mod download
+      - run: go test ./... -run Integration
+
+  build:
+    name: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.27"
+          cache: false
+      - run: go mod download
+      - run: go build -o bin/clerk ./cmd/clerk
+      - uses: actions/upload-artifact@v7
+        with:
+          name: build-output
+          path: bin
+
+  docker:
+    name: docker
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v6
+      - name: Build image
+        run: docker build -t clerk:ci .
+      - name: Run container
+        # CLERK_ISSUER is required: without it the process exits immediately by
+        # design, and the healthcheck below would fail for the wrong reason.
+        run: |
+          docker run -d --name clerk \
+            -e CLERK_ISSUER=http://localhost:8080 \
+            -p 8080:8080 clerk:ci
+      - name: Healthcheck
+        run: |
+          for i in $(seq 1 15); do
+            if curl -fsS http://localhost:8080/health >/dev/null; then
+              echo "container is serving"; exit 0
+            fi
+            sleep 2
+          done
+          echo "container did not become healthy"; docker logs clerk; exit 1
+      - name: Stop container
+        if: always()
+        run: docker rm -f clerk || true
+
+  # Secret + dependency scan, toggled by the SECURITY_SCAN repo variable so it can
+  # be flipped without editing this file. Deterministic tooling — no LLM in the loop.
+  security:
+    name: security
+    runs-on: ubuntu-latest
+    if: vars.SECURITY_SCAN == 'true'
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - name: Secret scan (gitleaks)
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          # Personal accounts need no license; GitHub *orgs* require GITLEAKS_LICENSE.
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.27"
+          cache: false
+      - name: Dependency vulnerability audit
+        run: |
+          go install golang.org/x/vuln/cmd/govulncheck@latest
+          govulncheck ./...

@@ -1,0 +1,21 @@
+# Build output
+/bin/
+/dist/
+# Anchored: an unanchored "clerk" would also match the cmd/clerk/ directory.
+/clerk
+
+# Local runtime state (SQLite DB, signing keys)
+/data/
+/keys/
+*.db
+*.db-shm
+*.db-wal
+*.pem
+
+# Local environment
+.env
+.env.local
+
+# Test output
+coverage.out
+*.test
