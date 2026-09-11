@@ -469,3 +469,43 @@ func TestTokenEndpointRejectsGET(t *testing.T) {
 		t.Error("GET /token was served; credentials would land in the URL")
 	}
 }
+
+// Nothing previously asserted which lifetime reached which token, so swapping
+// the two Options fields — or using the wrong one inside mintIDToken — would
+// have passed the whole suite.
+func TestAccessAndIDTokenLifetimesAreDistinctAndCorrect(t *testing.T) {
+	const (
+		accessTTL = 11 * time.Minute
+		idTTL     = 37 * time.Minute
+	)
+	fixed := time.Unix(1_700_000_000, 0).UTC()
+
+	f := newFlowWith(t, "https://idp.example.com", func(o *Options) {
+		o.AccessTokenTTL = accessTTL
+		o.IDTokenTTL = idTTL
+		o.Now = func() time.Time { return fixed }
+	})
+
+	got := decodeToken(t, f.exchange(f.tokenForm(f.obtainCode(t, nil))))
+
+	if want := int(accessTTL.Seconds()); got.ExpiresIn != want {
+		t.Errorf("expires_in = %d, want %d (the access token lifetime)", got.ExpiresIn, want)
+	}
+
+	parsed, err := jwt.ParseSigned(got.IDToken, []jose.SignatureAlgorithm{jose.RS256})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var claims jwt.Claims
+	if err := parsed.Claims(f.signer.Public(), &claims); err != nil {
+		t.Fatal(err)
+	}
+
+	if !claims.IssuedAt.Time().Equal(fixed) {
+		t.Errorf("iat = %v, want the injected clock %v", claims.IssuedAt.Time(), fixed)
+	}
+	if want := fixed.Add(idTTL); !claims.Expiry.Time().Equal(want) {
+		t.Errorf("exp = %v, want %v (the ID token lifetime, not the access token's)",
+			claims.Expiry.Time(), want)
+	}
+}

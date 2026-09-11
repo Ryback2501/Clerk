@@ -69,6 +69,10 @@ type Options struct {
 
 	// Logger defaults to the package-level logger.
 	Logger *slog.Logger
+
+	// Now defaults to time.Now. Overriding it lets tests assert token
+	// lifetimes exactly instead of sleeping.
+	Now func() time.Time
 }
 
 // Provider serves the OIDC endpoints.
@@ -117,7 +121,10 @@ func New(opts Options) (*Provider, error) {
 		authRequestTTL: opts.AuthRequestTTL,
 		accessTokenTTL: opts.AccessTokenTTL,
 		idTokenTTL:     opts.IDTokenTTL,
-		now:            time.Now,
+		now:            opts.Now,
+	}
+	if p.now == nil {
+		p.now = time.Now
 	}
 	if p.logger == nil {
 		p.logger = slog.Default()

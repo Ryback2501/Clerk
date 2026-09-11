@@ -282,7 +282,7 @@ func TestAccessTokenIsStoredHashedAndResolves(t *testing.T) {
 	app, _ := createApp(t, s, "App", "https://app.example.com/cb")
 	user := mustCreateUser(t, s, app.ID, "david")
 
-	plain, err := s.IssueAccessToken(ctx(), app.ID, user.ID, "openid profile", time.Hour)
+	plain, err := s.IssueAccessToken(ctx(), app.ID, user.ID, "openid profile", "", time.Hour)
 	if err != nil {
 		t.Fatalf("IssueAccessToken() error: %v", err)
 	}
@@ -318,7 +318,7 @@ func TestExpiredAccessTokenIsRejected(t *testing.T) {
 
 	start := time.Unix(1_000_000, 0)
 	s.now = fixedClock(start)
-	plain, err := s.IssueAccessToken(ctx(), app.ID, user.ID, "openid", time.Hour)
+	plain, err := s.IssueAccessToken(ctx(), app.ID, user.ID, "openid", "", time.Hour)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -343,7 +343,7 @@ func TestAccessTokensCascadeWithTheirUser(t *testing.T) {
 	app, _ := createApp(t, s, "App", "https://app.example.com/cb")
 	user := mustCreateUser(t, s, app.ID, "david")
 
-	plain, err := s.IssueAccessToken(ctx(), app.ID, user.ID, "openid", time.Hour)
+	plain, err := s.IssueAccessToken(ctx(), app.ID, user.ID, "openid", "", time.Hour)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -352,5 +352,48 @@ func TestAccessTokensCascadeWithTheirUser(t *testing.T) {
 	}
 	if _, err := s.LookupAccessToken(ctx(), plain); !errors.Is(err, ErrNotFound) {
 		t.Error("an access token outlived the user it identified")
+	}
+}
+
+// RFC 6749 §4.1.2: detecting a replay must also invalidate what the first
+// redemption produced. Otherwise the party who redeemed a leaked code first
+// keeps a usable token for its whole lifetime and the legitimate client simply
+// gets an error.
+func TestReplayRevokesTokensIssuedFromTheSameCode(t *testing.T) {
+	s := openTemp(t)
+	app, _ := createApp(t, s, "App", "https://app.example.com/cb")
+	user := mustCreateUser(t, s, app.ID, "david")
+	plainCode, _ := issueCode(t, s, app.ID, user.ID)
+
+	if _, err := s.ConsumeAuthCode(ctx(), plainCode); err != nil {
+		t.Fatal(err)
+	}
+	stolen, err := s.IssueAccessToken(ctx(), app.ID, user.ID, "openid", plainCode, time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// An unrelated token must survive the revocation.
+	unrelatedCode, _ := issueCode(t, s, app.ID, user.ID)
+	unrelated, err := s.IssueAccessToken(ctx(), app.ID, user.ID, "openid", unrelatedCode, time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := s.ConsumeAuthCode(ctx(), plainCode); !errors.Is(err, ErrCodeReplayed) {
+		t.Fatalf("expected a replay, got %v", err)
+	}
+
+	revoked, err := s.RevokeTokensIssuedForCode(ctx(), plainCode)
+	if err != nil {
+		t.Fatalf("RevokeTokensIssuedForCode() error: %v", err)
+	}
+	if revoked != 1 {
+		t.Errorf("revoked %d tokens, want 1", revoked)
+	}
+	if _, err := s.LookupAccessToken(ctx(), stolen); !errors.Is(err, ErrNotFound) {
+		t.Error("the token issued from the replayed code is still usable")
+	}
+	if _, err := s.LookupAccessToken(ctx(), unrelated); err != nil {
+		t.Errorf("an unrelated token was revoked: %v", err)
 	}
 }

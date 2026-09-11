@@ -148,8 +148,10 @@ func parseDuration(key, raw string, def time.Duration) (time.Duration, error) {
 	if err != nil {
 		return 0, fmt.Errorf("%s is not a valid duration (e.g. 60s, 5m): %w", key, err)
 	}
-	if d <= 0 {
-		return 0, fmt.Errorf("%s must be positive, got %s", key, d)
+	// Lifetimes are reported to clients in whole seconds, so anything under a
+	// second truncates to zero and reads as already expired.
+	if d < time.Second {
+		return 0, fmt.Errorf("%s must be at least 1s, got %s", key, d)
 	}
 	return d, nil
 }

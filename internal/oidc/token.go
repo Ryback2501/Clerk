@@ -77,12 +77,19 @@ func (p *Provider) handleToken(w http.ResponseWriter, r *http.Request) {
 		p.tokenError(w, r, http.StatusBadRequest, errInvalidGrant, "the authorization code has expired")
 		return
 	case errors.Is(err, store.ErrCodeReplayed):
-		// Worth a louder line than the others: a second presentation of a code
-		// suggests it was captured somewhere.
+		// A replay means the code reached someone it should not have, and the
+		// first redemption may have been theirs. RFC 6749 §4.1.2 says to
+		// revoke what that redemption produced; refusing this second exchange
+		// alone would leave a working bearer token in the wrong hands.
+		//
 		// granted is nil on this path — the store reports the replay without
 		// returning the code's contents, so only the presenting client is known.
+		revoked, revokeErr := p.store.RevokeTokensIssuedForCode(r.Context(), code)
+		if revokeErr != nil {
+			p.logger.ErrorContext(r.Context(), "revoke tokens after code replay", "err", revokeErr)
+		}
 		p.logger.WarnContext(r.Context(), "authorization code replayed",
-			"presented_by_application_id", app.ID)
+			"presented_by_application_id", app.ID, "tokens_revoked", revoked)
 		p.tokenError(w, r, http.StatusBadRequest, errInvalidGrant, "the authorization code has already been used")
 		return
 	case err != nil:
@@ -116,15 +123,24 @@ func (p *Provider) handleToken(w http.ResponseWriter, r *http.Request) {
 	}
 
 	user, err := p.store.GetUser(r.Context(), granted.UserID)
-	if err != nil {
-		// The user was deleted between authorization and exchange, or the
-		// store failed. Either way there is no identity to assert.
-		p.logger.ErrorContext(r.Context(), "load user for token exchange", "err", err, "user_id", granted.UserID)
+	switch {
+	case errors.Is(err, store.ErrNotFound):
+		// Deleted between authorization and exchange: the grant really is
+		// permanently invalid, which is what invalid_grant means.
+		p.logger.WarnContext(r.Context(), "token exchange for a deleted user",
+			"application_id", app.ID, "user_id", granted.UserID)
 		p.tokenError(w, r, http.StatusBadRequest, errInvalidGrant, "the authorized user no longer exists")
+		return
+	case err != nil:
+		// A transient store failure is not a permanently invalid grant.
+		// Reporting it as one makes clients discard the session and force a
+		// fresh sign-in instead of retrying.
+		p.logger.ErrorContext(r.Context(), "load user for token exchange", "err", err, "user_id", granted.UserID)
+		p.tokenError(w, r, http.StatusInternalServerError, errServerError, "the tokens could not be issued")
 		return
 	}
 
-	accessToken, err := p.store.IssueAccessToken(r.Context(), app.ID, user.ID, granted.Scope, p.accessTokenTTL)
+	accessToken, err := p.store.IssueAccessToken(r.Context(), app.ID, user.ID, granted.Scope, code, p.accessTokenTTL)
 	if err != nil {
 		p.logger.ErrorContext(r.Context(), "issue access token", "err", err)
 		p.tokenError(w, r, http.StatusInternalServerError, errServerError, "the tokens could not be issued")
@@ -155,16 +171,16 @@ func (p *Provider) handleToken(w http.ResponseWriter, r *http.Request) {
 // both methods the discovery document advertises. On failure it has already
 // written the response.
 func (p *Provider) authenticateClient(w http.ResponseWriter, r *http.Request) (*store.Application, bool) {
-	clientID, clientSecret, usedBasic := clientCredentials(r)
+	clientID, clientSecret := clientCredentials(r)
 	if clientID == "" {
-		p.tokenErrorAuth(w, r, usedBasic, "client authentication is required")
+		p.tokenErrorAuth(w, r, "client authentication is required")
 		return nil, false
 	}
 
 	app, err := p.store.GetApplicationByClientID(r.Context(), clientID)
 	if errors.Is(err, store.ErrNotFound) {
 		p.logger.WarnContext(r.Context(), "token request from an unknown client", "client_id", clientID)
-		p.tokenErrorAuth(w, r, usedBasic, "client authentication failed")
+		p.tokenErrorAuth(w, r, "client authentication failed")
 		return nil, false
 	}
 	if err != nil {
@@ -182,7 +198,7 @@ func (p *Provider) authenticateClient(w http.ResponseWriter, r *http.Request) (*
 	if !ok {
 		p.logger.WarnContext(r.Context(), "token request with an invalid client secret",
 			"application_id", app.ID, "client_id", clientID)
-		p.tokenErrorAuth(w, r, usedBasic, "client authentication failed")
+		p.tokenErrorAuth(w, r, "client authentication failed")
 		return nil, false
 	}
 	return app, true
@@ -191,7 +207,7 @@ func (p *Provider) authenticateClient(w http.ResponseWriter, r *http.Request) (*
 // clientCredentials reads the credentials from either advertised method.
 // HTTP Basic takes precedence, and RFC 6749 §2.3.1 requires its two halves to
 // be form-urlencoded before base64, which Go's BasicAuth does not undo.
-func clientCredentials(r *http.Request) (id, secret string, usedBasic bool) {
+func clientCredentials(r *http.Request) (id, secret string) {
 	if user, pass, ok := r.BasicAuth(); ok {
 		decodedUser, err := url.QueryUnescape(user)
 		if err != nil {
@@ -201,9 +217,9 @@ func clientCredentials(r *http.Request) (id, secret string, usedBasic bool) {
 		if err != nil {
 			decodedPass = pass
 		}
-		return decodedUser, decodedPass, true
+		return decodedUser, decodedPass
 	}
-	return r.PostFormValue("client_id"), r.PostFormValue("client_secret"), false
+	return r.PostFormValue("client_id"), r.PostFormValue("client_secret")
 }
 
 // verifyPKCE checks a code verifier against the challenge the code carries.
@@ -274,11 +290,12 @@ func (p *Provider) tokenError(w http.ResponseWriter, r *http.Request, status int
 	})
 }
 
-// tokenErrorAuth writes an invalid_client response. RFC 6749 §5.2 requires a
-// challenge when the client attempted HTTP Basic authentication.
-func (p *Provider) tokenErrorAuth(w http.ResponseWriter, r *http.Request, usedBasic bool, description string) {
-	// The challenge is sent for both methods: it tells a client that failed
-	// with form credentials which scheme this endpoint accepts.
+// tokenErrorAuth writes an invalid_client response.
+//
+// RFC 6749 §5.2 requires the challenge when the client attempted HTTP Basic.
+// It is sent unconditionally: for a client that failed with form credentials
+// it also advertises which scheme this endpoint accepts.
+func (p *Provider) tokenErrorAuth(w http.ResponseWriter, r *http.Request, description string) {
 	w.Header().Set("WWW-Authenticate", `Basic realm="clerk", charset="UTF-8"`)
 	p.tokenError(w, r, http.StatusUnauthorized, errInvalidClient, description)
 }
