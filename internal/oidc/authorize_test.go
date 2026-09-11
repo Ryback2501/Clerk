@@ -17,17 +17,20 @@ import (
 )
 
 type flow struct {
-	t     *testing.T
-	mux   *http.ServeMux
-	store *store.Store
-	app   *store.Application
-	user  *store.User
-	jar   map[string]string
+	t        *testing.T
+	mux      *http.ServeMux
+	store    *store.Store
+	app      *store.Application
+	user     *store.User
+	jar      map[string]string
+	basePath string
 }
 
 const testRedirect = "https://app.example.com/cb"
 
-func newFlow(t *testing.T) *flow {
+func newFlow(t *testing.T) *flow { return newFlowWithIssuer(t, "https://idp.example.com") }
+
+func newFlowWithIssuer(t *testing.T, issuerURL string) *flow {
 	t.Helper()
 	dir := t.TempDir()
 
@@ -41,7 +44,10 @@ func newFlow(t *testing.T) *flow {
 	if err != nil {
 		t.Fatal(err)
 	}
-	issuer, _ := url.Parse("https://idp.example.com")
+	issuer, err := url.Parse(issuerURL)
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	p, err := New(Options{Issuer: issuer, Signer: signer, Store: s})
 	if err != nil {
@@ -59,7 +65,11 @@ func newFlow(t *testing.T) *flow {
 
 	mux := http.NewServeMux()
 	p.Register(mux)
-	return &flow{t: t, mux: mux, store: s, app: app, user: user, jar: map[string]string{}}
+	return &flow{
+		t: t, mux: mux, store: s, app: app, user: user,
+		jar:      map[string]string{},
+		basePath: strings.TrimRight(issuer.Path, "/"),
+	}
 }
 
 func (f *flow) do(req *http.Request) *httptest.ResponseRecorder {
@@ -98,7 +108,7 @@ func (f *flow) authorize(overrides map[string]string) *httptest.ResponseRecorder
 		}
 		q.Set(k, v)
 	}
-	return f.do(httptest.NewRequest(http.MethodGet, AuthorizePath+"?"+q.Encode(), nil))
+	return f.do(httptest.NewRequest(http.MethodGet, f.basePath+AuthorizePath+"?"+q.Encode(), nil))
 }
 
 var (
@@ -122,7 +132,7 @@ func (f *flow) login(page string, userID string) *httptest.ResponseRecorder {
 		web.CSRFFieldName: {token[1]},
 		"user_id":         {userID},
 	}
-	req := httptest.NewRequest(http.MethodPost, AuthorizePath, strings.NewReader(form.Encode()))
+	req := httptest.NewRequest(http.MethodPost, formAction(f.t, page), strings.NewReader(form.Encode()))
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	return f.do(req)
 }
@@ -424,15 +434,6 @@ func TestLoginRejectsAUserFromAnotherApplication(t *testing.T) {
 	}
 }
 
-func TestAuthorizeRejectsNonGETAndLoginRejectsNonPOST(t *testing.T) {
-	f := newFlow(t)
-
-	rec := f.do(httptest.NewRequest(http.MethodDelete, AuthorizePath, nil))
-	if rec.Code == http.StatusOK {
-		t.Error("DELETE /authorize was served")
-	}
-}
-
 func mustCode(t *testing.T, rec *httptest.ResponseRecorder) string {
 	t.Helper()
 	loc, err := url.Parse(rec.Header().Get("Location"))
@@ -485,5 +486,110 @@ func TestScopeWithoutOpenIDIsStillRejected(t *testing.T) {
 	loc, _ := url.Parse(rec.Header().Get("Location"))
 	if got := loc.Query().Get("error"); got != "invalid_scope" {
 		t.Errorf("error = %q, want invalid_scope", got)
+	}
+}
+
+var actionPattern = regexp.MustCompile(`<form method="post" action="([^"]+)"`)
+
+// formAction returns where the rendered login page actually posts to. Tests
+// must follow the page rather than assume a path, or a form pointing at an
+// unregistered route would go unnoticed.
+func formAction(t *testing.T, page string) string {
+	t.Helper()
+	m := actionPattern.FindStringSubmatch(page)
+	if m == nil {
+		t.Fatal("the login page has no form action")
+	}
+	return m[1]
+}
+
+// The provider mounts its endpoints under the issuer's path, so a login form
+// that posts to a hardcoded /authorize is unreachable in exactly the
+// deployment the discovery document advertises — nobody could ever sign in.
+func TestLoginWorksWhenTheIssuerHasAPathPrefix(t *testing.T) {
+	f := newFlowWithIssuer(t, "https://example.com/oidc")
+
+	rec := f.authorize(nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET /oidc/authorize = %d, want 200: %s", rec.Code, rec.Body.String())
+	}
+	page := rec.Body.String()
+
+	if got := formAction(t, page); got != "/oidc"+AuthorizePath {
+		t.Errorf("form posts to %q, want it under the issuer path", got)
+	}
+
+	users := userValuePattern.FindStringSubmatch(page)
+	if users == nil {
+		t.Fatal("no selectable user")
+	}
+	login := f.login(page, users[1])
+	if login.Code != http.StatusFound {
+		t.Fatalf("login under a path-prefixed issuer returned %d, want 302: %s", login.Code, login.Body.String())
+	}
+	if code := mustCode(t, login); code == "" {
+		t.Error("no authorization code was issued")
+	}
+}
+
+// The stylesheet must be reachable from the login page under the same prefix,
+// or a proxy forwarding only the issuer path serves an unstyled page.
+func TestLoginPageStylesheetIsUnderTheIssuerPath(t *testing.T) {
+	f := newFlowWithIssuer(t, "https://example.com/oidc")
+	page := f.authorize(nil).Body.String()
+
+	m := regexp.MustCompile(`<link rel="stylesheet" href="([^"]+)"`).FindStringSubmatch(page)
+	if m == nil {
+		t.Fatal("the login page links no stylesheet")
+	}
+	if !strings.HasPrefix(m[1], "/oidc/") {
+		t.Errorf("stylesheet href = %q, want it under the issuer path", m[1])
+	}
+
+	rec := f.do(httptest.NewRequest(http.MethodGet, m[1], nil))
+	if rec.Code != http.StatusOK {
+		t.Errorf("GET %s = %d, want the stylesheet to be served", m[1], rec.Code)
+	}
+}
+
+// A database failure is not the same as someone tampering with the form: one
+// is a server fault, the other a security event. Conflating them logs a false
+// security warning and tells the user something untrue.
+func TestStoreFailureDuringLoginIsNotReportedAsTampering(t *testing.T) {
+	f := newFlow(t)
+	page := f.authorize(nil).Body.String()
+	users := userValuePattern.FindStringSubmatch(page)
+
+	// Closing the database makes the user lookup fail for infrastructure
+	// reasons rather than because the selection was wrong.
+	if err := f.store.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	rec := f.login(page, users[1])
+	if rec.Code != http.StatusInternalServerError {
+		t.Errorf("status = %d, want 500 for a store failure", rec.Code)
+	}
+	if strings.Contains(rec.Body.String(), "does not belong to the application") {
+		t.Error("a database failure was reported to the user as an invalid selection")
+	}
+}
+
+// The method is part of each registered pattern; losing it would let the
+// wrong handler serve a route.
+func TestAuthorizeRoutesAreMethodScoped(t *testing.T) {
+	f := newFlow(t)
+
+	// POST to /authorize without a form must not reach the GET handler.
+	req := httptest.NewRequest(http.MethodPost, AuthorizePath, strings.NewReader(""))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	if rec := f.do(req); rec.Code == http.StatusOK {
+		t.Error("a bare POST rendered a page; it should have failed CSRF validation")
+	}
+
+	for _, method := range []string{http.MethodDelete, http.MethodPut, http.MethodPatch} {
+		if rec := f.do(httptest.NewRequest(method, AuthorizePath, nil)); rec.Code != http.StatusMethodNotAllowed {
+			t.Errorf("%s /authorize = %d, want 405", method, rec.Code)
+		}
 	}
 }

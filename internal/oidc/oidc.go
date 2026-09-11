@@ -101,7 +101,7 @@ func New(opts Options) (*Provider, error) {
 		signer:         opts.Signer,
 		store:          opts.Store,
 		logger:         opts.Logger,
-		csrf:           web.NewCSRF(),
+		csrf:           web.NewCSRF(web.LoginCSRFCookie),
 		pages:          pages,
 		codeTTL:        opts.CodeTTL,
 		authRequestTTL: opts.AuthRequestTTL,
@@ -153,6 +153,16 @@ type pageData struct {
 	Users           []*store.User
 	RequestID       string
 	CSRFToken       string
+	CSRFField       string
+
+	// AuthorizeAction is where the login form posts. It is rendered rather
+	// than hardcoded because the endpoints are mounted under the issuer's
+	// path, and a form pointing at the server root would be unreachable there.
+	AuthorizeAction string
+
+	// formAction is the value of the CSP directive of the same name, empty on
+	// pages that submit nowhere.
+	formAction string
 }
 
 // renderPage writes an HTML page. Rendering into a buffer first means a
@@ -164,7 +174,8 @@ func (p *Provider) renderPage(w http.ResponseWriter, r *http.Request, page strin
 		http.Error(w, "template not found", http.StatusInternalServerError)
 		return
 	}
-	data.Stylesheet = web.Stylesheet
+	data.Stylesheet = p.path(web.StaticPath) + web.StylesheetFile
+	data.CSRFField = web.CSRFFieldName
 
 	var buf bytes.Buffer
 	if err := tmpl.ExecuteTemplate(&buf, "layout", data); err != nil {
@@ -177,8 +188,17 @@ func (p *Provider) renderPage(w http.ResponseWriter, r *http.Request, page strin
 	w.Header().Set("X-Content-Type-Options", "nosniff")
 	w.Header().Set("X-Frame-Options", "DENY")
 	w.Header().Set("Referrer-Policy", "no-referrer")
+	// form-action is scoped per page. The login form's response is a redirect
+	// to the client's registered URI, and WebKit enforces form-action across
+	// redirects that follow a form submission — a bare 'self' would break
+	// sign-in in Safari at the final hop while working elsewhere.
+	formAction := "'none'"
+	if data.formAction != "" {
+		formAction = data.formAction
+	}
 	w.Header().Set("Content-Security-Policy",
-		"default-src 'none'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; form-action 'self'; frame-ancestors 'none'; base-uri 'none'")
+		"default-src 'none'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; "+
+			"form-action "+formAction+"; frame-ancestors 'none'; base-uri 'none'")
 	w.Header().Set("Cache-Control", "no-store")
 
 	w.WriteHeader(status)
@@ -191,7 +211,14 @@ func (p *Provider) renderPage(w http.ResponseWriter, r *http.Request, page strin
 // sending anything to the client application. It is used for exactly the cases
 // where the request cannot be shown to belong to a registered client.
 func (p *Provider) refuse(w http.ResponseWriter, r *http.Request, title, message, detail string) {
-	p.renderPage(w, r, "error", http.StatusBadRequest, pageData{
+	p.refuseStatus(w, r, http.StatusBadRequest, title, message, detail)
+}
+
+// refuseStatus is refuse with an explicit status, so an internal fault is not
+// reported as a client error — a proxy or uptime check reading a 400 would
+// treat a database outage as permanent and never retry or alarm.
+func (p *Provider) refuseStatus(w http.ResponseWriter, r *http.Request, status int, title, message, detail string) {
+	p.renderPage(w, r, "error", status, pageData{
 		Title:   title,
 		Message: message,
 		Detail:  detail,
@@ -212,6 +239,12 @@ func (p *Provider) Register(mux *http.ServeMux) {
 	mux.HandleFunc("GET "+p.path(JWKSPath), p.handleJWKS)
 	mux.HandleFunc("GET "+p.path(AuthorizePath), p.handleAuthorize)
 	mux.HandleFunc("POST "+p.path(AuthorizePath), p.handleLogin)
+
+	// Serve the shared assets under the issuer's path too, so a proxy
+	// forwarding only that prefix still reaches the login page's stylesheet.
+	if prefix := p.path(web.StaticPath); prefix != web.StaticPath {
+		web.RegisterAt(mux, prefix)
+	}
 }
 
 // base is the issuer with any trailing slash removed, so joining a path cannot

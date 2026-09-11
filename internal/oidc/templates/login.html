@@ -4,9 +4,9 @@
   <p class="muted">Pick a test identity. There is no password.</p>
 </hgroup>
 
-<form method="post" action="/authorize">
+<form method="post" action="{{.AuthorizeAction}}">
   <input type="hidden" name="request_id" value="{{.RequestID}}">
-  <input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
+  <input type="hidden" name="{{.CSRFField}}" value="{{.CSRFToken}}">
 
   <label>
     Select user

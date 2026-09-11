@@ -9,10 +9,17 @@ import (
 )
 
 const (
-	// CSRFCookieName is the cookie holding the token.
-	CSRFCookieName = "clerk_csrf"
+	// AdminCSRFCookie and LoginCSRFCookie keep the two surfaces separate.
+	//
+	// The administration interface and the public login page share this
+	// implementation but must not share a token: any registered client can
+	// drive a browser to the login page, so a single cookie would mean a token
+	// valid for admin state-changing routes is embedded in a page that clients
+	// control the entry to.
+	AdminCSRFCookie = "clerk_csrf_admin"
+	LoginCSRFCookie = "clerk_csrf_login"
 
-	// CSRFFieldName is the hidden form field echoing it back.
+	// CSRFFieldName is the hidden form field echoing the token back.
 	CSRFFieldName = "csrf_token"
 
 	csrfTokenBytes = 32
@@ -31,10 +38,12 @@ var ErrCSRF = errors.New("csrf token missing or invalid")
 // is reached by a redirect from a third-party application, so the cookie is
 // SameSite=Lax rather than Strict: Strict would withhold it on that navigation
 // and every sign-in would fail.
-type CSRF struct{}
+type CSRF struct {
+	cookieName string
+}
 
-// NewCSRF returns a CSRF guard.
-func NewCSRF() *CSRF { return &CSRF{} }
+// NewCSRF returns a guard storing its token in the named cookie.
+func NewCSRF(cookieName string) *CSRF { return &CSRF{cookieName: cookieName} }
 
 // Reuse matters: minting a fresh token per page would invalidate the form in
 // any other open tab.
@@ -42,7 +51,7 @@ func NewCSRF() *CSRF { return &CSRF{} }
 // Issue returns the token to embed in a form, reusing the request's existing
 // token when it has one.
 func (c *CSRF) Issue(w http.ResponseWriter, r *http.Request) string {
-	if cookie, err := r.Cookie(CSRFCookieName); err == nil && cookie.Value != "" {
+	if cookie, err := r.Cookie(c.cookieName); err == nil && cookie.Value != "" {
 		return cookie.Value
 	}
 
@@ -54,7 +63,7 @@ func (c *CSRF) Issue(w http.ResponseWriter, r *http.Request) string {
 	}
 
 	http.SetCookie(w, &http.Cookie{
-		Name:     CSRFCookieName,
+		Name:     c.cookieName,
 		Value:    token,
 		Path:     "/",
 		HttpOnly: true,
@@ -69,7 +78,7 @@ func (c *CSRF) Issue(w http.ResponseWriter, r *http.Request) string {
 // Check verifies a state-changing request. It fails closed: any missing or
 // mismatched value is a rejection.
 func (c *CSRF) Check(r *http.Request) error {
-	cookie, err := r.Cookie(CSRFCookieName)
+	cookie, err := r.Cookie(c.cookieName)
 	if err != nil || cookie.Value == "" {
 		return ErrCSRF
 	}

@@ -15,21 +15,29 @@ import (
 //go:embed all:static
 var staticFS embed.FS
 
-// StaticPath is the URL prefix the assets are served under.
+// StaticPath is the default URL prefix the assets are served under.
 const StaticPath = "/static/"
 
-// Stylesheet is the URL of the shared stylesheet, for use in templates.
-const Stylesheet = StaticPath + "pico.min.css"
+// StylesheetFile is the stylesheet's name within the asset tree.
+const StylesheetFile = "pico.min.css"
 
-// Register mounts the static assets on mux.
-func Register(mux *http.ServeMux) {
+// Stylesheet is the stylesheet's URL under the default prefix.
+const Stylesheet = StaticPath + StylesheetFile
+
+// Register mounts the static assets at the default prefix.
+func Register(mux *http.ServeMux) { RegisterAt(mux, StaticPath) }
+
+// RegisterAt mounts the static assets at prefix, which must begin and end with
+// a slash. The OIDC endpoints serve them under the issuer's path as well, so a
+// proxy forwarding only that prefix still reaches them.
+func RegisterAt(mux *http.ServeMux, prefix string) {
 	sub, err := fs.Sub(staticFS, "static")
 	if err != nil {
 		// The tree is embedded at build time, so this cannot fail in a built
 		// binary.
 		panic("web: embedded static assets unavailable: " + err.Error())
 	}
-	mux.Handle("GET "+StaticPath, http.StripPrefix(StaticPath, http.FileServer(http.FS(noDirFS{sub}))))
+	mux.Handle("GET "+prefix, http.StripPrefix(prefix, http.FileServer(http.FS(noDirFS{sub}))))
 }
 
 // noDirFS refuses to open directories, so the file server cannot serve a

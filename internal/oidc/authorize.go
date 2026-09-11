@@ -67,7 +67,7 @@ func (p *Provider) handleAuthorize(w http.ResponseWriter, r *http.Request) {
 	}
 	if err != nil {
 		p.logger.ErrorContext(r.Context(), "load application", "err", err)
-		p.refuse(w, r, "Something went wrong",
+		p.refuseStatus(w, r, http.StatusInternalServerError, "Something went wrong",
 			"The authorization request could not be processed.", "")
 		return
 	}
@@ -167,6 +167,10 @@ func (p *Provider) handleAuthorize(w http.ResponseWriter, r *http.Request) {
 		Users:           users,
 		RequestID:       parked.ID,
 		CSRFToken:       p.csrf.Issue(w, r),
+		AuthorizeAction: p.path(AuthorizePath),
+		// The submission's response redirects to the client, so that origin
+		// has to be permitted or Safari refuses the final hop.
+		formAction: "'self' " + originOf(req.redirectURI),
 	})
 }
 
@@ -191,7 +195,8 @@ func (p *Provider) handleLogin(w http.ResponseWriter, r *http.Request) {
 	}
 	if err != nil {
 		p.logger.ErrorContext(r.Context(), "consume authorization request", "err", err)
-		p.refuse(w, r, "Something went wrong", "The sign-in could not be completed.", "")
+		p.refuseStatus(w, r, http.StatusInternalServerError, "Something went wrong",
+			"The sign-in could not be completed.", "")
 		return
 	}
 
@@ -211,7 +216,17 @@ func (p *Provider) handleLogin(w http.ResponseWriter, r *http.Request) {
 	}
 
 	user, err := p.store.GetUser(r.Context(), userID)
-	if err != nil || user.ApplicationID != parked.ApplicationID {
+	switch {
+	case err != nil && !errors.Is(err, store.ErrNotFound):
+		// A store failure is a server fault, not a tampering attempt. Treating
+		// the two alike would log a false security warning and tell the user
+		// something untrue about their own selection.
+		p.logger.ErrorContext(r.Context(), "load user during login", "err", err, "user_id", userID)
+		p.refuseStatus(w, r, http.StatusInternalServerError, "Something went wrong",
+			"The sign-in could not be completed.", "")
+		return
+
+	case err != nil || user.ApplicationID != parked.ApplicationID:
 		// The selected identity must belong to the application that started
 		// this request; otherwise a tampered form could sign in as anyone in
 		// the provider.
@@ -329,4 +344,14 @@ func validatePKCE(challenge, method string) error {
 		return errors.New("unsupported code_challenge_method: only S256 is supported")
 	}
 	return nil
+}
+
+// originOf reduces a URI to the scheme://host form a CSP directive accepts.
+func originOf(raw string) string {
+	u, err := url.Parse(raw)
+	if err != nil || u.Scheme == "" || u.Host == "" {
+		// Registration validated the URI, so this is unreachable in practice.
+		return "'self'"
+	}
+	return u.Scheme + "://" + u.Host
 }

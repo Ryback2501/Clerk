@@ -8,7 +8,7 @@ import (
 )
 
 func TestIssueTokenSetsACookieAndReturnsAMatchingToken(t *testing.T) {
-	g := NewCSRF()
+	g := NewCSRF(AdminCSRFCookie)
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/admin", nil)
 
@@ -36,26 +36,26 @@ func TestIssueTokenSetsACookieAndReturnsAMatchingToken(t *testing.T) {
 // An existing token must be reused, or opening two tabs would invalidate the
 // form in the first one.
 func TestIssueReusesAnExistingToken(t *testing.T) {
-	g := NewCSRF()
+	g := NewCSRF(AdminCSRFCookie)
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/admin", nil)
 	first := g.Issue(rec, req)
 
 	second := httptest.NewRequest(http.MethodGet, "/admin", nil)
-	second.AddCookie(&http.Cookie{Name: CSRFCookieName, Value: first})
+	second.AddCookie(&http.Cookie{Name: AdminCSRFCookie, Value: first})
 	if got := g.Issue(httptest.NewRecorder(), second); got != first {
 		t.Errorf("issue() minted a new token %q for a request already carrying %q", got, first)
 	}
 }
 
 func TestCheckAcceptsAMatchingFormField(t *testing.T) {
-	g := NewCSRF()
+	g := NewCSRF(AdminCSRFCookie)
 	token := g.Issue(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/admin", nil))
 
 	req := httptest.NewRequest(http.MethodPost, "/admin/applications",
 		strings.NewReader(CSRFFieldName+"="+token))
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	req.AddCookie(&http.Cookie{Name: CSRFCookieName, Value: token})
+	req.AddCookie(&http.Cookie{Name: AdminCSRFCookie, Value: token})
 
 	if err := g.Check(req); err != nil {
 		t.Errorf("check() rejected a valid token: %v", err)
@@ -63,7 +63,7 @@ func TestCheckAcceptsAMatchingFormField(t *testing.T) {
 }
 
 func TestCheckRejectsForgeries(t *testing.T) {
-	g := NewCSRF()
+	g := NewCSRF(AdminCSRFCookie)
 	good := g.Issue(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/admin", nil))
 
 	tests := []struct {
@@ -84,7 +84,7 @@ func TestCheckRejectsForgeries(t *testing.T) {
 				strings.NewReader(CSRFFieldName+"="+tt.field))
 			req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 			if tt.cookie != "" {
-				req.AddCookie(&http.Cookie{Name: CSRFCookieName, Value: tt.cookie})
+				req.AddCookie(&http.Cookie{Name: AdminCSRFCookie, Value: tt.cookie})
 			}
 
 			if err := g.Check(req); err == nil {
