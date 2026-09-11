@@ -35,6 +35,13 @@ type Config struct {
 	CodeTTL        time.Duration
 	AccessTokenTTL time.Duration
 	IDTokenTTL     time.Duration
+
+	// AdminInsecure permits running with administration wide open, which is
+	// the only mode available until the external sign-in adapter lands. It
+	// must be set deliberately: defaulting to it would mean every image built
+	// from this source exposes application creation, secret regeneration and
+	// deletion to anyone who can reach the port.
+	AdminInsecure bool
 }
 
 // Getenv reads an environment variable. Taking it as a parameter keeps Load
@@ -76,10 +83,30 @@ func Load(getenv Getenv) (*Config, error) {
 		*d.target = v
 	}
 
+	insecure, err := parseBool("CLERK_ADMIN_INSECURE", getenv("CLERK_ADMIN_INSECURE"))
+	if err != nil {
+		problems = append(problems, err)
+	}
+	cfg.AdminInsecure = insecure
+
 	if len(problems) > 0 {
 		return nil, errors.Join(problems...)
 	}
 	return cfg, nil
+}
+
+// parseBool accepts the spellings people actually type in a compose file.
+func parseBool(key, raw string) (bool, error) {
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case "":
+		return false, nil
+	case "1", "true", "yes", "on":
+		return true, nil
+	case "0", "false", "no", "off":
+		return false, nil
+	default:
+		return false, fmt.Errorf("%s must be true or false, got %q", key, raw)
+	}
 }
 
 // parseIssuer enforces the shape OpenID Connect requires of an issuer

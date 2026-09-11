@@ -1,0 +1,71 @@
+{{define "content" -}}
+<hgroup>
+  <h1>{{.Application.Name}}</h1>
+  <p class="muted">Registered {{.Application.CreatedAt}}</p>
+</hgroup>
+
+{{if .Error}}<p role="alert"><strong>{{.Error}}</strong></p>{{end}}
+
+{{if .RevealedSecret}}
+<article>
+  <header><strong>Client secret</strong></header>
+  <p><code class="value">{{.RevealedSecret}}</code></p>
+  <footer>
+    <strong>Copy it now.</strong> Only a hash is stored, so this secret cannot be shown
+    again. If you lose it, regenerate a new one below — you do not need to recreate the
+    application.
+  </footer>
+</article>
+{{end}}
+
+<h2>Credentials</h2>
+<dl>
+  <dt>Client ID</dt>
+  <dd><code class="value">{{.Application.ClientID}}</code></dd>
+  <dt>Client secret</dt>
+  <dd class="muted">Stored as a hash and never displayed again.</dd>
+</dl>
+
+<form method="post" action="/admin/applications/{{.Application.ID}}/secret">
+  <input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
+  <button type="submit" class="secondary">Regenerate client secret</button>
+  <small>The current secret stops working immediately.</small>
+</form>
+
+<h2>Redirect URIs</h2>
+{{if .Application.RedirectURIs}}
+<table>
+  <tbody>
+  {{range .Application.RedirectURIs}}
+    <tr>
+      <td><code class="value">{{.}}</code></td>
+      <td style="width:1%">
+        <form method="post" action="/admin/applications/{{$.Application.ID}}/redirect-uris/remove">
+          <input type="hidden" name="csrf_token" value="{{$.CSRFToken}}">
+          <input type="hidden" name="uri" value="{{.}}">
+          <button type="submit" class="secondary outline">Remove</button>
+        </form>
+      </td>
+    </tr>
+  {{end}}
+  </tbody>
+</table>
+{{else}}
+<p role="alert">No redirect URIs registered. Authorization requests will be rejected until you add one.</p>
+{{end}}
+
+<form method="post" action="/admin/applications/{{.Application.ID}}/redirect-uris">
+  <input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
+  <label>
+    Add a redirect URI
+    <input type="url" name="uri" required placeholder="https://app.example.com/callback">
+  </label>
+  <button type="submit">Add redirect URI</button>
+</form>
+
+<h2>Test users</h2>
+<p class="muted">Users are managed in a later step.</p>
+
+<h2>Danger zone</h2>
+<p><a href="/admin/applications/{{.Application.ID}}/delete" role="button" class="danger">Delete application</a></p>
+{{- end}}

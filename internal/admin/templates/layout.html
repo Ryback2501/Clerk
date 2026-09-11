@@ -1,0 +1,41 @@
+{{define "layout" -}}
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{{.Title}} — Clerk</title>
+  <link rel="stylesheet" href="/admin/static/pico.min.css">
+  <style>
+    :root { --pico-font-size: 100%; }
+    body > header, body > main, body > footer { padding-block: 1rem; }
+    .muted { color: var(--pico-muted-color); }
+    code.value { word-break: break-all; user-select: all; }
+    .danger { --pico-primary: var(--pico-del-color); }
+    table { font-size: .95em; }
+    .banner { padding: .75rem 1rem; border-radius: var(--pico-border-radius); margin-bottom: 1rem; }
+    .banner-warn { background: var(--pico-mark-background-color); color: var(--pico-mark-color); }
+  </style>
+</head>
+<body>
+<header class="container">
+  <nav>
+    <ul><li><strong><a href="/admin">Clerk</a></strong></li></ul>
+    <ul><li class="muted">{{.Admin.Name}}</li></ul>
+  </nav>
+  {{if .Insecure}}
+  <div class="banner banner-warn" role="alert">
+    <strong>Admin authentication is disabled.</strong>
+    Every request is authorised. Do not expose this instance to an untrusted network.
+  </div>
+  {{end}}
+</header>
+<main class="container">
+{{template "content" .}}
+</main>
+<footer class="container">
+  <small class="muted">Clerk — an OpenID Connect provider for development and testing. Not for authenticating real users.</small>
+</footer>
+</body>
+</html>
+{{- end}}

@@ -149,3 +149,46 @@ func TestLoadReportsAllProblemsAtOnce(t *testing.T) {
 		}
 	}
 }
+
+// Until real admin authentication exists, the interface is open to anyone who
+// can reach the port. Running in that state has to be a deliberate, explicit
+// act rather than the default.
+func TestAdminInsecureMustBeOptedInto(t *testing.T) {
+	base := map[string]string{"CLERK_ISSUER": "http://localhost:8080"}
+
+	cfg, err := Load(envMap(base))
+	if err != nil {
+		t.Fatalf("Load() error: %v", err)
+	}
+	if cfg.AdminInsecure {
+		t.Error("AdminInsecure defaults to true; an unauthenticated admin UI must be opt-in")
+	}
+
+	for _, v := range []string{"1", "true", "TRUE", "yes"} {
+		env := map[string]string{"CLERK_ISSUER": base["CLERK_ISSUER"], "CLERK_ADMIN_INSECURE": v}
+		cfg, err := Load(envMap(env))
+		if err != nil {
+			t.Fatalf("Load() with CLERK_ADMIN_INSECURE=%q: %v", v, err)
+		}
+		if !cfg.AdminInsecure {
+			t.Errorf("CLERK_ADMIN_INSECURE=%q did not enable insecure admin mode", v)
+		}
+	}
+
+	for _, v := range []string{"0", "false", "no", ""} {
+		env := map[string]string{"CLERK_ISSUER": base["CLERK_ISSUER"], "CLERK_ADMIN_INSECURE": v}
+		cfg, err := Load(envMap(env))
+		if err != nil {
+			t.Fatalf("Load() with CLERK_ADMIN_INSECURE=%q: %v", v, err)
+		}
+		if cfg.AdminInsecure {
+			t.Errorf("CLERK_ADMIN_INSECURE=%q enabled insecure admin mode", v)
+		}
+	}
+
+	if _, err := Load(envMap(map[string]string{
+		"CLERK_ISSUER": base["CLERK_ISSUER"], "CLERK_ADMIN_INSECURE": "maybe",
+	})); err == nil {
+		t.Error("an unrecognised CLERK_ADMIN_INSECURE value was accepted")
+	}
+}

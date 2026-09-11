@@ -1,0 +1,28 @@
+{{define "content" -}}
+<hgroup>
+  <h1>Register an application</h1>
+  <p>The client ID and secret are generated for you. The secret is shown once.</p>
+</hgroup>
+
+{{if .Error}}<p role="alert"><strong>{{.Error}}</strong></p>{{end}}
+
+<form method="post" action="/admin/applications">
+  <input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
+
+  <label>
+    Application name
+    <input type="text" name="name" value="{{.Form.Name}}" required autofocus
+           placeholder="My Test Application">
+  </label>
+
+  <label>
+    Redirect URIs
+    <textarea name="redirect_uris" rows="4"
+              placeholder="https://app.example.com/callback">{{.Form.RedirectURIs}}</textarea>
+    <small>One per line. Matched exactly at authorization time — no wildcards, no prefixes.</small>
+  </label>
+
+  <button type="submit">Register application</button>
+  <a href="/admin" role="button" class="secondary outline">Cancel</a>
+</form>
+{{- end}}
