@@ -31,6 +31,7 @@ type flow struct {
 	secret   string
 	signer   *keys.Signer
 	clock    *testClock
+	prov     *Provider
 }
 
 // testClock lets a test move time forward for both the provider and the store,
@@ -41,6 +42,10 @@ func (c *testClock) Now() time.Time { return c.at }
 
 // advance moves the shared clock forward.
 func (f *flow) advance(d time.Duration) { f.clock.at = f.clock.at.Add(d) }
+
+// provider rebuilds a Provider matching this flow, for tests that need the
+// object rather than the mux.
+func (f *flow) provider() *Provider { return f.prov }
 
 // ctx returns a context for direct store calls in tests.
 func (f *flow) ctx() context.Context { return context.Background() }
@@ -113,6 +118,7 @@ func newFlowWith(t *testing.T, issuerURL string, configure func(*Options)) *flow
 	p.Register(mux)
 	return &flow{
 		t: t, mux: mux, store: s, app: app, user: user, clock: clock,
+		prov:     p,
 		jar:      map[string]string{},
 		basePath: strings.TrimRight(issuer.Path, "/"),
 		secret:   appSecret,
