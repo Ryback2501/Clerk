@@ -21,7 +21,17 @@
 <header class="container">
   <nav>
     <ul><li><strong><a href="/admin">Clerk</a></strong></li></ul>
-    <ul><li class="muted">{{.Admin.Name}}</li></ul>
+    <ul>
+      <li class="muted">{{.Admin.Name}}</li>
+      {{if .SignedIn}}
+      <li>
+        <form method="post" action="/admin/signout" style="margin:0">
+          <input type="hidden" name="{{.CSRFField}}" value="{{.CSRFToken}}">
+          <button type="submit" class="secondary outline">Sign out</button>
+        </form>
+      </li>
+      {{end}}
+    </ul>
   </nav>
   {{if .Insecure}}
   <div class="banner banner-warn" role="alert">

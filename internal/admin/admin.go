@@ -35,6 +35,10 @@ type Handler struct {
 	auth   adminauth.Authenticator
 	logger *slog.Logger
 
+	// oauth is set only when administration is really authenticated. It drives
+	// the sign-in routes, which do not exist otherwise.
+	oauth *adminauth.OAuth
+
 	csrf   *web.CSRF
 	reveal *revealStore
 	pages  map[string]*template.Template
@@ -44,9 +48,18 @@ type Handler struct {
 	insecure bool
 }
 
-// New builds the admin handler. Pass insecure when the authenticator does not
-// actually authenticate, so the interface can warn about it.
+// New builds the admin handler with an authenticator that does not
+// authenticate. The interface warns about it on every page.
 func New(s *store.Store, auth adminauth.Authenticator, insecure bool) (*Handler, error) {
+	return newHandler(s, auth, nil, insecure)
+}
+
+// NewWithOAuth builds the admin handler backed by real sign-in.
+func NewWithOAuth(s *store.Store, oauth *adminauth.OAuth) (*Handler, error) {
+	return newHandler(s, oauth, oauth, false)
+}
+
+func newHandler(s *store.Store, auth adminauth.Authenticator, oauth *adminauth.OAuth, insecure bool) (*Handler, error) {
 	pages, err := parsePages()
 	if err != nil {
 		return nil, err
@@ -54,6 +67,7 @@ func New(s *store.Store, auth adminauth.Authenticator, insecure bool) (*Handler,
 	return &Handler{
 		store:    s,
 		auth:     auth,
+		oauth:    oauth,
 		logger:   slog.Default(),
 		csrf:     web.NewCSRF(web.AdminCSRFCookie),
 		reveal:   newRevealStore(),
@@ -97,6 +111,8 @@ func parsePages() (map[string]*template.Template, error) {
 
 // Register wires the admin routes onto mux.
 func (h *Handler) Register(mux *http.ServeMux) {
+	h.registerSignIn(mux)
+
 	mux.HandleFunc("GET /admin", h.guard(h.listApplications))
 	// ServeMux only synthesises /x -> /x/, never the reverse, so the
 	// trailing-slash form has to be registered explicitly.
@@ -149,6 +165,10 @@ func (h *Handler) guardWrite(next handlerFunc) http.HandlerFunc {
 func (h *Handler) denied(w http.ResponseWriter, r *http.Request, err error) {
 	switch {
 	case errors.Is(err, adminauth.ErrUnauthenticated):
+		if h.oauth != nil {
+			http.Redirect(w, r, signInPath, http.StatusSeeOther)
+			return
+		}
 		h.renderError(w, r, nil, http.StatusUnauthorized, "Sign in required",
 			"You must sign in to use the administration interface.")
 	case errors.Is(err, adminauth.ErrForbidden):
