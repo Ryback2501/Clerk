@@ -266,6 +266,10 @@ func (p *Provider) Register(mux *http.ServeMux) {
 	mux.HandleFunc("GET "+p.path(AuthorizePath), p.handleAuthorize)
 	mux.HandleFunc("POST "+p.path(AuthorizePath), p.handleLogin)
 	mux.HandleFunc("POST "+p.path(TokenPath), p.handleToken)
+	mux.HandleFunc("GET "+p.path(UserInfoPath), p.handleUserInfo)
+	// OIDC Core §5.3.1 permits POST as well, for clients that would rather not
+	// put the token in a header-bearing GET.
+	mux.HandleFunc("POST "+p.path(UserInfoPath), p.handleUserInfo)
 
 	// Serve the shared assets under the issuer's path too, so a proxy
 	// forwarding only that prefix still reaches the login page's stylesheet.

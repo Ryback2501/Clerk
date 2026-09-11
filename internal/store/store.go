@@ -100,6 +100,10 @@ func (s *Store) verifyPragmas() error {
 	return nil
 }
 
+// SetClock replaces the store's notion of now. It exists for tests that need
+// to exercise expiry without sleeping; production code leaves it alone.
+func (s *Store) SetClock(now func() time.Time) { s.now = now }
+
 // DB exposes the underlying handle for queries.
 func (s *Store) DB() *sql.DB { return s.db }
 
