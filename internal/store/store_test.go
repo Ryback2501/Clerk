@@ -78,19 +78,43 @@ func TestForeignKeysAreEnforced(t *testing.T) {
 	}
 }
 
-func TestForeignKeysEnforcedOnEveryPooledConnection(t *testing.T) {
-	s := openTemp(t)
+// The pragma is set in the DSN rather than with a one-off Exec precisely so it
+// applies to every connection. Opening the same file twice yields two
+// independent pools, which is what makes this a real test: a pragma applied
+// only to the first connection of the first pool would not reach the second.
+func TestForeignKeysEnforcedOnEveryNewConnection(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "clerk.db")
 
-	// Force the pool to hand out several distinct connections; a pragma applied
-	// to only the first would let later writes slip through unchecked.
-	for i := 0; i < 5; i++ {
+	first, err := Open(path)
+	if err != nil {
+		t.Fatalf("first Open() error: %v", err)
+	}
+	defer first.Close()
+
+	second, err := Open(path)
+	if err != nil {
+		t.Fatalf("second Open() error: %v", err)
+	}
+	defer second.Close()
+
+	appID := insertApp(t, first, "App A", "cid-a")
+
+	for name, s := range map[string]*Store{"first": first, "second": second} {
 		var on int
 		if err := s.DB().QueryRow(`PRAGMA foreign_keys`).Scan(&on); err != nil {
-			t.Fatalf("read pragma: %v", err)
+			t.Fatalf("%s connection: read pragma: %v", name, err)
 		}
 		if on != 1 {
-			t.Fatalf("foreign_keys = %d on pooled connection %d, want 1", on, i)
+			t.Errorf("%s connection: foreign_keys = %d, want 1", name, on)
 		}
+		if err := insertUser(t, s, 99999, "ghost-"+name, "sub-ghost-"+name); err == nil {
+			t.Errorf("%s connection: accepted a user with a dangling application_id", name)
+		}
+	}
+
+	// A valid insert must still work on the second handle.
+	if err := insertUser(t, second, appID, "david", "sub-ok"); err != nil {
+		t.Errorf("second connection rejected a valid insert: %v", err)
 	}
 }
 
