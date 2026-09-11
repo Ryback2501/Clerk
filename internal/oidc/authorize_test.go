@@ -77,7 +77,8 @@ func newFlowWith(t *testing.T, issuerURL string, configure func(*Options)) *flow
 	t.Helper()
 	dir := t.TempDir()
 
-	s, err := store.Open(filepath.Join(dir, "clerk.db"))
+	clock := &testClock{at: time.Now()}
+	s, err := store.Open(filepath.Join(dir, "clerk.db"), store.WithClock(clock.Now))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -91,9 +92,6 @@ func newFlowWith(t *testing.T, issuerURL string, configure func(*Options)) *flow
 	if err != nil {
 		t.Fatal(err)
 	}
-
-	clock := &testClock{at: time.Now()}
-	s.SetClock(clock.Now)
 
 	opts := Options{Issuer: issuer, Signer: signer, Store: s, Now: clock.Now}
 	if configure != nil {

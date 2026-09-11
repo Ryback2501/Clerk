@@ -29,9 +29,21 @@ type Store struct {
 	now func() time.Time
 }
 
+// Option adjusts a Store at construction.
+type Option func(*Store)
+
+// WithClock replaces the store's notion of now.
+//
+// It is set at construction rather than through a setter so the field is never
+// written after the Store is shared: a background purge goroutine reads it
+// concurrently, and a mutator would be a data race.
+func WithClock(now func() time.Time) Option {
+	return func(s *Store) { s.now = now }
+}
+
 // Open connects to the SQLite database at path, creating the file and any
 // missing parent directories, then applies outstanding migrations.
-func Open(path string) (*Store, error) {
+func Open(path string, opts ...Option) (*Store, error) {
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return nil, fmt.Errorf("create database directory: %w", err)
 	}
@@ -47,6 +59,9 @@ func Open(path string) (*Store, error) {
 	db.SetMaxOpenConns(1)
 
 	s := &Store{db: db, now: time.Now}
+	for _, opt := range opts {
+		opt(s)
+	}
 	if err := s.verifyPragmas(); err != nil {
 		_ = db.Close()
 		return nil, err
@@ -99,10 +114,6 @@ func (s *Store) verifyPragmas() error {
 	}
 	return nil
 }
-
-// SetClock replaces the store's notion of now. It exists for tests that need
-// to exercise expiry without sleeping; production code leaves it alone.
-func (s *Store) SetClock(now func() time.Time) { s.now = now }
 
 // DB exposes the underlying handle for queries.
 func (s *Store) DB() *sql.DB { return s.db }

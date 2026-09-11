@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 	"time"
@@ -94,7 +95,7 @@ func TestUserInfoRejectsBadTokens(t *testing.T) {
 	}{
 		{"no token at all", ""},
 		{"a token that was never issued", "not-a-real-token"},
-		{"an authorization code used as a bearer token", "wrong-kind-of-credential"},
+		{"a value that is not a credential at all", "wrong-kind-of-credential"},
 	}
 
 	for _, tt := range tests {
@@ -148,19 +149,77 @@ func TestUserInfoRejectsNonBearerSchemes(t *testing.T) {
 		"Bearer  ",
 	} {
 		t.Run(header, func(t *testing.T) {
-			req := httptest.NewRequest(http.MethodGet, UserInfoPath, nil)
+			req := httptest.NewRequest(http.MethodGet, f.basePath+UserInfoPath, nil)
 			req.Header.Set("Authorization", header)
 			rec := httptest.NewRecorder()
 			f.mux.ServeHTTP(rec, req)
 
-			if rec.Code == http.StatusOK {
-				t.Errorf("Authorization: %q was accepted", header)
+			// Asserting 401 specifically: "not 200" would also be satisfied by
+			// a 404, so the test would keep passing if the route vanished.
+			if rec.Code != http.StatusUnauthorized {
+				t.Errorf("Authorization: %q returned %d, want 401", header, rec.Code)
 			}
 		})
 	}
 }
 
-// Deleting a user must immediately stop their tokens working.
+// An unredeemed authorization code is a credential, but not this kind. It must
+// not be usable as a bearer token.
+func TestUserInfoRejectsAnAuthorizationCode(t *testing.T) {
+	f := newFlow(t)
+	code := f.obtainCode(t, nil)
+
+	rec := f.userinfo(code)
+	if rec.Code != http.StatusUnauthorized {
+		t.Errorf("an authorization code was accepted at userinfo: %d", rec.Code)
+	}
+
+	// And it must still work where it belongs.
+	if got := f.exchange(f.tokenForm(code)); got.Code != http.StatusOK {
+		t.Errorf("presenting the code at userinfo consumed it: token exchange returned %d", got.Code)
+	}
+}
+
+// OIDC Core §5.3.1 permits POST, and RFC 6750 §2.2 puts the credential in the
+// form body. A client doing that must not be refused while holding a valid
+// token.
+func TestUserInfoAcceptsAFormEncodedPost(t *testing.T) {
+	f := newFlow(t)
+	token := f.accessTokenFor(t, nil)
+
+	req := httptest.NewRequest(http.MethodPost, f.basePath+UserInfoPath,
+		strings.NewReader(url.Values{"access_token": {token}}.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+
+	rec := httptest.NewRecorder()
+	f.mux.ServeHTTP(rec, req)
+
+	claims := claimsFrom(t, rec)
+	if claims["sub"] != f.user.Sub {
+		t.Errorf("sub = %v, want %q", claims["sub"], f.user.Sub)
+	}
+}
+
+// Without credentials there is nothing to call invalid, and saying otherwise
+// makes a client discard a token that may be fine.
+func TestMissingCredentialsAreNotReportedAsAnInvalidToken(t *testing.T) {
+	f := newFlow(t)
+	rec := f.userinfo("")
+
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want 401", rec.Code)
+	}
+	if strings.Contains(rec.Body.String(), "invalid_token") {
+		t.Errorf("body = %s, want no error code when nothing was presented", rec.Body.String())
+	}
+	if strings.Contains(rec.Header().Get("WWW-Authenticate"), "error=") {
+		t.Errorf("challenge = %q, want no error parameter", rec.Header().Get("WWW-Authenticate"))
+	}
+}
+
+// Deleting a user must immediately stop their tokens working. In practice the
+// foreign key cascade removes the tokens, so this asserts the observable
+// outcome rather than any particular code path.
 func TestUserInfoAfterTheUserIsDeleted(t *testing.T) {
 	f := newFlow(t)
 	token := f.accessTokenFor(t, nil)

@@ -19,10 +19,12 @@ const bearerPrefix = "Bearer "
 // depends on administration or its authorization service: a client that has a
 // valid token must keep being able to resolve it.
 func (p *Provider) handleUserInfo(w http.ResponseWriter, r *http.Request) {
-	token, ok := bearerToken(r)
+	token, ok := accessTokenFrom(r)
 	if !ok {
 		// RFC 6750 §3.1: omit the error code when no credentials were offered
-		// at all — there is nothing yet to call invalid.
+		// at all. Saying "invalid_token" here would tell a client whose header
+		// a proxy stripped that its perfectly good token is bad, and it would
+		// discard the session.
 		p.unauthorized(w, r, "", "")
 		return
 	}
@@ -46,8 +48,9 @@ func (p *Provider) handleUserInfo(w http.ResponseWriter, r *http.Request) {
 	user, err := p.store.GetUser(r.Context(), granted.UserID)
 	switch {
 	case errors.Is(err, store.ErrNotFound):
-		// The identity was deleted after the token was issued, so there is
-		// nothing left to describe.
+		// Defence in depth. The tokens table cascades on user deletion, so in
+		// practice LookupAccessToken has already failed above; this branch
+		// matters only if that foreign key is ever not enforced.
 		p.logger.WarnContext(r.Context(), "userinfo request for a deleted user",
 			"user_id", granted.UserID)
 		p.unauthorized(w, r, "invalid_token", "the access token is expired or invalid")
@@ -69,6 +72,34 @@ func (p *Provider) handleUserInfo(w http.ResponseWriter, r *http.Request) {
 	p.writeJSONStatus(w, r, http.StatusOK, claims)
 }
 
+// accessTokenFrom extracts the credential a UserInfo request carries.
+//
+// The Authorization header is preferred (RFC 6750 §2.1). A form-encoded POST
+// body is also accepted (§2.2), because OIDC Core §5.3.1 permits POST and a
+// client using it would otherwise be silently refused despite presenting a
+// valid token.
+func accessTokenFrom(r *http.Request) (string, bool) {
+	if token, ok := bearerToken(r); ok {
+		return token, true
+	}
+
+	if r.Method != http.MethodPost {
+		return "", false
+	}
+	// RFC 6750 §2.2 requires this content type; reading any other body would
+	// accept credentials from places the spec does not put them.
+	if ct := r.Header.Get("Content-Type"); !strings.HasPrefix(ct, "application/x-www-form-urlencoded") {
+		return "", false
+	}
+	if err := r.ParseForm(); err != nil {
+		return "", false
+	}
+	if token := strings.TrimSpace(r.PostFormValue("access_token")); token != "" {
+		return token, true
+	}
+	return "", false
+}
+
 // bearerToken extracts the credential from the Authorization header. The
 // scheme name is case-insensitive per RFC 7235, but the token itself is not.
 func bearerToken(r *http.Request) (string, bool) {
@@ -85,16 +116,41 @@ func bearerToken(r *http.Request) (string, bool) {
 }
 
 // unauthorized writes a 401 with the challenge RFC 6750 §3 requires.
+//
+// An empty code means no credentials were offered, which is not the same as a
+// bad one: both the challenge and the body then omit the error, so a client
+// cannot mistake a stripped header for a rejected token.
 func (p *Provider) unauthorized(w http.ResponseWriter, r *http.Request, code, description string) {
 	challenge := `Bearer realm="clerk"`
+	body := map[string]string{}
+
 	if code != "" {
-		challenge += `, error="` + code + `", error_description="` + description + `"`
+		challenge += `, error="` + quoteEscape(code) + `", error_description="` + quoteEscape(description) + `"`
+		body["error"] = code
+		body["error_description"] = description
 	}
 	w.Header().Set("WWW-Authenticate", challenge)
 
 	// The body carries no identity detail: the caller has not shown it may
 	// have any.
-	p.writeJSONStatus(w, r, http.StatusUnauthorized, map[string]string{
-		"error": "invalid_token",
-	})
+	p.writeJSONStatus(w, r, http.StatusUnauthorized, body)
+}
+
+// quoteEscape makes a value safe inside an RFC 7235 quoted-string. Today's
+// callers pass fixed literals, but a header built by concatenation is one
+// careless caller away from being splittable.
+func quoteEscape(v string) string {
+	var b strings.Builder
+	for _, r := range v {
+		switch {
+		case r == '"' || r == '\\':
+			b.WriteByte('\\')
+			b.WriteRune(r)
+		case r < 0x20 || r == 0x7f:
+			// Control characters, including CR and LF, are dropped outright.
+		default:
+			b.WriteRune(r)
+		}
+	}
+	return b.String()
 }
