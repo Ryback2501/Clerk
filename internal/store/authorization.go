@@ -315,6 +315,8 @@ func (s *Store) PurgeExpired(ctx context.Context) error {
 		`DELETE FROM auth_requests WHERE expires_at < ?`,
 		`DELETE FROM auth_codes WHERE expires_at < ?`,
 		`DELETE FROM access_tokens WHERE expires_at < ?`,
+		`DELETE FROM admin_sessions WHERE expires_at < ?`,
+		`DELETE FROM admin_logins WHERE expires_at < ?`,
 	} {
 		if _, err := s.db.ExecContext(ctx, stmt, cutoff); err != nil {
 			return fmt.Errorf("purge expired authorization state: %w", err)

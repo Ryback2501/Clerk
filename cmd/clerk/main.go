@@ -39,6 +39,11 @@ func main() {
 }
 
 func run(logger *slog.Logger) error {
+	// Signal handling is installed first so a signal arriving during startup —
+	// which now includes reaching out to the sign-in providers — is not lost.
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
 	cfg, err := config.Load(os.Getenv)
 	if err != nil {
 		return fmt.Errorf("configuration: %w", err)
@@ -70,33 +75,16 @@ func run(logger *slog.Logger) error {
 		return fmt.Errorf("oidc provider: %w", err)
 	}
 
-	// Admin authentication is not implemented yet, so the only authenticator
-	// available authorises everyone. Refuse to start in that state unless the
-	// operator has explicitly asked for it: otherwise every image built from
-	// this source would quietly expose application creation, secret
-	// regeneration and deletion to anyone who can reach the port.
-	if !cfg.AdminInsecure {
-		return errors.New("administration has no authentication in this build: " +
-			"set CLERK_ADMIN_INSECURE=true to run anyway, and do not expose the port to an untrusted network")
-	}
-	logger.Warn(adminauth.Warning)
-
-	adminHandler, err := admin.New(db, adminauth.AllowAll{}, true)
+	adminHandler, err := buildAdmin(ctx, cfg, db, logger)
 	if err != nil {
-		return fmt.Errorf("admin interface: %w", err)
+		return err
 	}
-	adminHandler = adminHandler.WithLogger(logger)
 
 	srv := &http.Server{
 		Addr:              cfg.ListenAddr,
 		Handler:           newHandler(provider, adminHandler),
 		ReadHeaderTimeout: 10 * time.Second,
 	}
-
-	// Signal handling is installed before the listener starts so a signal
-	// arriving during startup is not lost.
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
 
 	// Expired authorization requests and codes are useless but not harmless:
 	// left alone they grow the database without bound. Reclaiming them is
@@ -124,6 +112,67 @@ func run(logger *slog.Logger) error {
 		return fmt.Errorf("shutdown: %w", err)
 	}
 	return nil
+}
+
+// buildAdmin wires the administration interface, with real authentication
+// where it is configured and an open stand-in only where the operator has
+// explicitly asked for one.
+func buildAdmin(ctx context.Context, cfg *config.Config, db *store.Store, logger *slog.Logger) (*admin.Handler, error) {
+	if cfg.AdminInsecure {
+		// Configuration already refuses this unless it was asked for; saying
+		// so again at startup means an open interface is never silent.
+		logger.Warn(adminauth.Warning)
+
+		handler, err := admin.New(db, adminauth.AllowAll{}, true)
+		if err != nil {
+			return nil, fmt.Errorf("admin interface: %w", err)
+		}
+		return handler.WithLogger(logger), nil
+	}
+
+	bouncer, err := adminauth.NewBouncer(adminauth.BouncerConfig{
+		BaseURL:      cfg.BouncerURL,
+		APIKey:       cfg.BouncerAPIKey,
+		RequiredRole: cfg.BouncerRequiredRole,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("role service: %w", err)
+	}
+
+	providers := make(map[string]adminauth.ClientCredentials, len(cfg.AdminProviders))
+	for name, creds := range cfg.AdminProviders {
+		providers[name] = adminauth.ClientCredentials{
+			ClientID:     creds.ClientID,
+			ClientSecret: creds.ClientSecret,
+			Issuer:       creds.Issuer,
+		}
+	}
+
+	// Discovery happens here, so an unreachable provider or a typo in an
+	// issuer is a startup failure rather than a broken sign-in later.
+	oauth, err := adminauth.NewOAuth(ctx, adminauth.OAuthConfig{
+		PublicURL:  cfg.Issuer,
+		Providers:  providers,
+		Store:      admin.NewSessionStore(db),
+		Authorizer: bouncer,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("admin sign-in: %w", err)
+	}
+
+	for _, name := range oauth.EnabledProviders() {
+		// The callback must be registered with each provider exactly, so it is
+		// worth stating plainly at startup.
+		logger.Info("admin sign-in provider ready", "provider", name, "callback", oauth.CallbackURL(name))
+	}
+	logger.Info("administration authorized by the role service",
+		"url", cfg.BouncerURL, "required_role", cfg.BouncerRequiredRole)
+
+	handler, err := admin.NewWithOAuth(db, oauth)
+	if err != nil {
+		return nil, fmt.Errorf("admin interface: %w", err)
+	}
+	return handler.WithLogger(logger), nil
 }
 
 // purgeInterval is how often expired authorization state is reclaimed. The

@@ -17,7 +17,14 @@ type pageData struct {
 	Insecure bool
 
 	CSRFToken string
+	CSRFField string
 	Error     string
+
+	// Providers is the sign-in page's list of enabled upstreams.
+	Providers []string
+
+	// SignedIn drives whether the layout offers a sign-out control.
+	SignedIn bool
 
 	Applications []*store.Application
 	Application  *store.Application

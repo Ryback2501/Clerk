@@ -1,0 +1,24 @@
+{{define "content" -}}
+<hgroup>
+  <h1>Sign in</h1>
+  <p>Administration of this OpenID Connect provider.</p>
+</hgroup>
+
+{{if .Error}}<p role="alert"><strong>{{.Error}}</strong></p>{{end}}
+
+{{if .Providers}}
+<p>Continue with:</p>
+{{range .Providers}}
+  <p><a href="/admin/auth/{{.}}/start" role="button" class="secondary">{{.}}</a></p>
+{{end}}
+<p><small class="muted">
+  Signing in proves who you are. Whether you may administer this provider is decided
+  separately by the role service.
+</small></p>
+{{else}}
+<p role="alert">
+  No sign-in providers are configured, so nobody can sign in. An operator must
+  configure at least one.
+</p>
+{{end}}
+{{- end}}
