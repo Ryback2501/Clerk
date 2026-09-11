@@ -45,16 +45,34 @@ func (p *Provider) WithLogger(l *slog.Logger) *Provider {
 
 // Register wires the provider's endpoints onto mux. The method is part of each
 // pattern, so anything but GET falls through to a 405.
+//
+// Endpoints are mounted under the issuer's path, not at the server root. An
+// issuer of https://example.com/oidc advertises https://example.com/oidc/jwks
+// in its discovery document, so that is the path this server must answer on —
+// otherwise every client that follows discovery gets a 404 on JWKS and can
+// never verify an ID token. Deployments behind a proxy must therefore forward
+// the full path rather than stripping the prefix.
 func (p *Provider) Register(mux *http.ServeMux) {
-	mux.HandleFunc("GET "+DiscoveryPath, p.handleDiscovery)
-	mux.HandleFunc("GET "+JWKSPath, p.handleJWKS)
+	mux.HandleFunc("GET "+p.path(DiscoveryPath), p.handleDiscovery)
+	mux.HandleFunc("GET "+p.path(JWKSPath), p.handleJWKS)
 }
 
-// absolute renders an endpoint path as an absolute URL under the issuer.
-// The issuer is stored without a trailing slash, so a simple join cannot
-// produce a doubled separator.
-func (p *Provider) absolute(path string) string {
-	return strings.TrimSuffix(p.issuer.String(), "/") + path
+// base is the issuer with any trailing slash removed, so joining a path cannot
+// produce a doubled separator. config.parseIssuer already normalises this; the
+// trim keeps Provider correct when constructed directly, as tests do.
+func (p *Provider) base() string {
+	return strings.TrimRight(p.issuer.String(), "/")
+}
+
+// path renders an endpoint path as served by this process: the issuer's path
+// prefix plus the endpoint.
+func (p *Provider) path(endpoint string) string {
+	return strings.TrimRight(p.issuer.Path, "/") + endpoint
+}
+
+// absolute renders an endpoint path as the absolute URL clients should call.
+func (p *Provider) absolute(endpoint string) string {
+	return p.base() + endpoint
 }
 
 // discoveryDocument is the OpenID Provider Metadata served at
@@ -79,7 +97,7 @@ type discoveryDocument struct {
 
 func (p *Provider) handleDiscovery(w http.ResponseWriter, r *http.Request) {
 	doc := discoveryDocument{
-		Issuer:                            p.issuer.String(),
+		Issuer:                            p.base(),
 		AuthorizationEndpoint:             p.absolute(AuthorizePath),
 		TokenEndpoint:                     p.absolute(TokenPath),
 		UserInfoEndpoint:                  p.absolute(UserInfoPath),
@@ -106,7 +124,12 @@ func (p *Provider) writeJSON(w http.ResponseWriter, r *http.Request, payload any
 		// Encoding a fixed struct cannot realistically fail; if it does, the
 		// response is already unrecoverable, so report it without detail.
 		p.logger.ErrorContext(r.Context(), "encode response", "path", r.URL.Path, "err", err)
-		http.Error(w, `{"error":"server_error"}`, http.StatusInternalServerError)
+		// Not http.Error: it would label this JSON body as text/plain, which a
+		// client checking the content type before parsing would refuse to read.
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("X-Content-Type-Options", "nosniff")
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = w.Write([]byte(`{"error":"server_error"}`))
 		return
 	}
 

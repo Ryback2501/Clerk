@@ -15,8 +15,8 @@ func TestOIDCDoesNotDependOnAdminPackages(t *testing.T) {
 	forbidden := []string{modulePath + "/internal/admin", modulePath + "/internal/adminauth"}
 
 	seen := map[string]bool{}
-	var walk func(pkgPath string, trail []string)
-	walk = func(pkgPath string, trail []string) {
+	var walk func(pkgPath string, trail []string, root bool)
+	walk = func(pkgPath string, trail []string, root bool) {
 		if seen[pkgPath] {
 			return
 		}
@@ -24,8 +24,14 @@ func TestOIDCDoesNotDependOnAdminPackages(t *testing.T) {
 
 		pkg, err := build.Import(pkgPath, "", 0)
 		if err != nil {
-			// Packages that do not exist yet (admin arrives in a later slice)
-			// simply cannot be depended on.
+			if root {
+				// Without this the whole guard would silently pass while
+				// checking nothing, and CLAUDE.md cites this test as the
+				// enforcement of the dependency rule.
+				t.Fatalf("cannot resolve %s, so this test would prove nothing: %v", pkgPath, err)
+			}
+			// A package that does not exist yet (internal/admin arrives in a
+			// later slice) cannot be depended on.
 			return
 		}
 		for _, imp := range pkg.Imports {
@@ -38,8 +44,13 @@ func TestOIDCDoesNotDependOnAdminPackages(t *testing.T) {
 						bad, strings.Join(trail, " -> "), imp)
 				}
 			}
-			walk(imp, append(trail, imp))
+			// Copy rather than append in place: successive iterations would
+			// otherwise share one backing array and the reported chain could
+			// name a sibling import instead of the real path.
+			next := make([]string, len(trail), len(trail)+1)
+			copy(next, trail)
+			walk(imp, append(next, imp), false)
 		}
 	}
-	walk(modulePath+"/internal/oidc", []string{"internal/oidc"})
+	walk(modulePath+"/internal/oidc", []string{"internal/oidc"}, true)
 }

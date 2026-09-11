@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -125,5 +126,88 @@ func TestLoadOrGenerateRejectsCorruptKeyFile(t *testing.T) {
 	// provider, so a damaged key must be a hard failure the operator sees.
 	if _, err := LoadOrGenerate(path); err == nil {
 		t.Fatal("LoadOrGenerate() accepted a corrupt key file, want error")
+	}
+}
+
+// Two instances sharing one keys volume must converge on a single key. If both
+// generated and the loser's write clobbered the winner's file, the loser would
+// keep serving a JWKS for a key that is no longer on disk, and every token it
+// issued would stop verifying after its next restart.
+func TestConcurrentLoadOrGenerateConvergesOnOneKey(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "signing.pem")
+
+	const racers = 8
+	var wg sync.WaitGroup
+	kids := make([]string, racers)
+	errs := make([]error, racers)
+
+	start := make(chan struct{})
+	for i := range racers {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start // release them together to widen the race window
+			s, err := LoadOrGenerate(path)
+			if err != nil {
+				errs[i] = err
+				return
+			}
+			kids[i] = s.KeyID()
+		}()
+	}
+	close(start)
+	wg.Wait()
+
+	for i, err := range errs {
+		if err != nil {
+			t.Fatalf("racer %d failed: %v", i, err)
+		}
+	}
+	for i, kid := range kids {
+		if kid != kids[0] {
+			t.Errorf("racer %d got kid %q, racer 0 got %q; instances disagree on the signing key",
+				i, kid, kids[0])
+		}
+	}
+
+	// The key on disk must be the one everybody reported.
+	reloaded, err := LoadOrGenerate(path)
+	if err != nil {
+		t.Fatalf("reload: %v", err)
+	}
+	if reloaded.KeyID() != kids[0] {
+		t.Errorf("on-disk kid %q does not match the kid handed out (%q)", reloaded.KeyID(), kids[0])
+	}
+
+	// No temporary files may be left behind in the keys directory.
+	entries, err := os.ReadDir(filepath.Dir(path))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range entries {
+		if strings.HasPrefix(e.Name(), ".signing-") {
+			t.Errorf("temporary key file %q was left on disk", e.Name())
+		}
+	}
+}
+
+// A half-written key must not be silently replaced: regenerating would
+// invalidate every token this provider ever issued, so an operator has to see it.
+func TestTruncatedKeyFileIsNotSilentlyReplaced(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "signing.pem")
+	if _, err := LoadOrGenerate(path); err != nil {
+		t.Fatal(err)
+	}
+
+	original, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, original[:len(original)/2], 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := LoadOrGenerate(path); err == nil {
+		t.Fatal("a truncated key file was accepted or silently regenerated")
 	}
 }

@@ -32,30 +32,42 @@ type Signer struct {
 	kid     string
 }
 
+// errKeyRaceLost reports that another process created the key file first, so
+// this one should load that key instead of its own.
+var errKeyRaceLost = errors.New("signing key was created concurrently")
+
 // LoadOrGenerate reads the signing key at path, creating it (and any missing
 // parent directories) on first run. A key that exists but cannot be parsed is
 // an error rather than a trigger to regenerate: silently minting a new key
 // would invalidate every previously issued token.
 func LoadOrGenerate(path string) (*Signer, error) {
-	pemBytes, err := os.ReadFile(path)
-	switch {
-	case err == nil:
-		key, err := parsePrivateKey(pemBytes)
-		if err != nil {
-			return nil, fmt.Errorf("signing key at %s is unreadable (refusing to regenerate, which would invalidate every issued token): %w", path, err)
-		}
-		return newSigner(key)
+	// At most two passes: either the key is there, or we create it, or we lost
+	// a creation race and the second pass loads the winner's key.
+	for attempt := 0; attempt < 2; attempt++ {
+		pemBytes, err := os.ReadFile(path)
+		switch {
+		case err == nil:
+			key, err := parsePrivateKey(pemBytes)
+			if err != nil {
+				return nil, fmt.Errorf("signing key at %s is unreadable (refusing to regenerate, which would invalidate every issued token): %w", path, err)
+			}
+			return newSigner(key)
 
-	case errors.Is(err, os.ErrNotExist):
-		key, err := generateAndPersist(path)
-		if err != nil {
-			return nil, err
-		}
-		return newSigner(key)
+		case errors.Is(err, os.ErrNotExist):
+			key, err := generateAndPersist(path)
+			if errors.Is(err, errKeyRaceLost) {
+				continue
+			}
+			if err != nil {
+				return nil, err
+			}
+			return newSigner(key)
 
-	default:
-		return nil, fmt.Errorf("read signing key %s: %w", path, err)
+		default:
+			return nil, fmt.Errorf("read signing key %s: %w", path, err)
+		}
 	}
+	return nil, fmt.Errorf("signing key at %s could not be loaded or created", path)
 }
 
 func newSigner(key *rsa.PrivateKey) (*Signer, error) {
@@ -80,13 +92,50 @@ func generateAndPersist(path string) (*rsa.PrivateKey, error) {
 		return nil, fmt.Errorf("marshal signing key: %w", err)
 	}
 
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return nil, fmt.Errorf("create key directory: %w", err)
 	}
+
+	// Write to a temporary file and link it into place, rather than writing the
+	// destination directly. os.WriteFile truncates first, so a crash mid-write
+	// would leave a half-written PEM that LoadOrGenerate refuses to replace —
+	// the container would then crashloop until someone deleted the file by
+	// hand. os.Link is atomic and fails if the destination exists, which also
+	// settles the race between two instances sharing one keys volume.
+	tmp, err := os.CreateTemp(dir, ".signing-*.pem")
+	if err != nil {
+		return nil, fmt.Errorf("create temporary key file: %w", err)
+	}
+	tmpName := tmp.Name()
+	defer func() { _ = os.Remove(tmpName) }()
+
 	// 0600: the private key is secret material and must not be readable by
-	// other accounts sharing the volume.
-	if err := os.WriteFile(path, pem.EncodeToMemory(&pem.Block{Type: pemBlockType, Bytes: der}), 0o600); err != nil {
+	// other accounts sharing the volume. CreateTemp already uses 0600, but the
+	// mode is set explicitly so the guarantee does not rest on that detail.
+	if err := tmp.Chmod(0o600); err != nil {
+		_ = tmp.Close()
+		return nil, fmt.Errorf("secure temporary key file: %w", err)
+	}
+	if _, err := tmp.Write(pem.EncodeToMemory(&pem.Block{Type: pemBlockType, Bytes: der})); err != nil {
+		_ = tmp.Close()
 		return nil, fmt.Errorf("write signing key: %w", err)
+	}
+	// Flush to disk before publishing the name, so a crash cannot expose an
+	// empty file under the real path.
+	if err := tmp.Sync(); err != nil {
+		_ = tmp.Close()
+		return nil, fmt.Errorf("flush signing key: %w", err)
+	}
+	if err := tmp.Close(); err != nil {
+		return nil, fmt.Errorf("close temporary key file: %w", err)
+	}
+
+	if err := os.Link(tmpName, path); err != nil {
+		if errors.Is(err, os.ErrExist) {
+			return nil, errKeyRaceLost
+		}
+		return nil, fmt.Errorf("publish signing key: %w", err)
 	}
 	return key, nil
 }

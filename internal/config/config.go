@@ -106,7 +106,10 @@ func parseIssuer(raw string) (*url.URL, error) {
 		return nil, fmt.Errorf("CLERK_ISSUER must not contain a fragment, got %q", raw)
 	}
 
-	u.Path = strings.TrimSuffix(u.Path, "/")
+	// Strip every trailing slash, not just one: "https://host//" would otherwise
+	// leave a path of "/", making the published issuer inconsistent with the
+	// endpoint URLs derived from it (RFC 8414 section 3.3).
+	u.Path = strings.TrimRight(u.Path, "/")
 	return u, nil
 }
 

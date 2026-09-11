@@ -66,11 +66,17 @@ func dsn(path string) string {
 	q.Add("_pragma", "journal_mode(WAL)")
 	// Wait rather than failing immediately if the writer is briefly busy.
 	q.Add("_pragma", "busy_timeout(5000)")
-	return "file:" + path + "?" + q.Encode()
+
+	// Build the URI through url.URL rather than concatenating. SQLite opens
+	// this with SQLITE_OPEN_URI, so it percent-decodes the path and treats "?"
+	// and "#" as delimiters: a raw path containing any of them would silently
+	// open a different file and drop the pragma list.
+	u := url.URL{Scheme: "file", Opaque: (&url.URL{Path: path}).EscapedPath(), RawQuery: q.Encode()}
+	return u.String()
 }
 
-// verifyPragmas confirms the DSN actually took effect, so a driver change can
-// never silently disable the guarantees the schema relies on.
+// verifyPragmas confirms the DSN actually took effect, so a driver change or a
+// malformed path can never silently disable the guarantees the schema relies on.
 func (s *Store) verifyPragmas() error {
 	var foreignKeys int
 	if err := s.db.QueryRow(`PRAGMA foreign_keys`).Scan(&foreignKeys); err != nil {
@@ -78,6 +84,14 @@ func (s *Store) verifyPragmas() error {
 	}
 	if foreignKeys != 1 {
 		return fmt.Errorf("foreign_keys pragma is %d, want 1: cascade deletion would silently not happen", foreignKeys)
+	}
+
+	var journalMode string
+	if err := s.db.QueryRow(`PRAGMA journal_mode`).Scan(&journalMode); err != nil {
+		return fmt.Errorf("read journal_mode pragma: %w", err)
+	}
+	if !strings.EqualFold(journalMode, "wal") {
+		return fmt.Errorf("journal_mode is %q, want wal", journalMode)
 	}
 	return nil
 }
@@ -105,13 +119,6 @@ func (s *Store) migrate() error {
 	}
 
 	for _, name := range names {
-		var applied int
-		if err := s.db.QueryRow(`SELECT COUNT(*) FROM schema_migrations WHERE name = ?`, name).Scan(&applied); err != nil {
-			return fmt.Errorf("check migration %s: %w", name, err)
-		}
-		if applied > 0 {
-			continue
-		}
 		if err := s.applyMigration(name); err != nil {
 			return err
 		}
@@ -119,6 +126,10 @@ func (s *Store) migrate() error {
 	return nil
 }
 
+// applyMigration runs one migration if it has not run before. The claim and the
+// schema change share a transaction: checking first and applying afterwards
+// would let two processes starting against the same volume both decide to run
+// it, and the loser would then fail on "table already exists" and exit.
 func (s *Store) applyMigration(name string) error {
 	body, err := migrationFS.ReadFile("migrations/" + name)
 	if err != nil {
@@ -131,11 +142,22 @@ func (s *Store) applyMigration(name string) error {
 	}
 	defer func() { _ = tx.Rollback() }()
 
+	// Claim the migration first. No rows affected means another process (or an
+	// earlier run) already owns it, so there is nothing to do.
+	claim, err := tx.Exec(`INSERT OR IGNORE INTO schema_migrations (name) VALUES (?)`, name)
+	if err != nil {
+		return fmt.Errorf("claim migration %s: %w", name, err)
+	}
+	claimed, err := claim.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("claim migration %s: %w", name, err)
+	}
+	if claimed == 0 {
+		return nil
+	}
+
 	if _, err := tx.Exec(string(body)); err != nil {
 		return fmt.Errorf("run migration %s: %w", name, err)
-	}
-	if _, err := tx.Exec(`INSERT INTO schema_migrations (name) VALUES (?)`, name); err != nil {
-		return fmt.Errorf("record migration %s: %w", name, err)
 	}
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("commit migration %s: %w", name, err)

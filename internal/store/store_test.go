@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -232,5 +233,40 @@ func TestRedirectURIIsUniquePerApplication(t *testing.T) {
 	}
 	if _, err := s.DB().Exec(`INSERT INTO redirect_uris (application_id, uri) VALUES (?, ?)`, appID, uri); err == nil {
 		t.Fatal("the same redirect URI was registered twice for one application")
+	}
+}
+
+// SQLite opens the DSN with SQLITE_OPEN_URI, so it percent-decodes the path and
+// treats "?" and "#" as delimiters. An unescaped path containing any of them
+// would open a different file than asked for and silently drop the pragma list.
+func TestOpenHandlesPathsNeedingEscaping(t *testing.T) {
+	for _, name := range []string{
+		"plain.db",
+		"with space.db",
+		"100%-full.db",
+		"query?.db",
+		"fragment#.db",
+	} {
+		t.Run(name, func(t *testing.T) {
+			dir := t.TempDir()
+			path := filepath.Join(dir, name)
+
+			s, err := Open(path)
+			if err != nil {
+				t.Fatalf("Open(%q) error: %v", path, err)
+			}
+			defer s.Close()
+
+			// The database must land at exactly the requested path...
+			if _, err := os.Stat(path); err != nil {
+				t.Errorf("database was not created at the requested path: %v", err)
+			}
+			// ...and the pragmas must have survived the round trip. Open already
+			// verifies these, so reaching here proves the query string arrived.
+			insertApp(t, s, "App A", "cid-"+name)
+			if err := insertUser(t, s, 99999, "ghost", "sub-ghost-"+name); err == nil {
+				t.Error("foreign keys are off; the pragma list was lost in the DSN")
+			}
+		})
 	}
 }

@@ -36,7 +36,7 @@ func get(t *testing.T, p *Provider, path string) *httptest.ResponseRecorder {
 
 func discoveryDoc(t *testing.T, p *Provider) map[string]any {
 	t.Helper()
-	rec := get(t, p, DiscoveryPath)
+	rec := get(t, p, strings.TrimRight(p.issuer.Path, "/")+DiscoveryPath)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("GET %s = %d, want 200", DiscoveryPath, rec.Code)
 	}
@@ -76,7 +76,6 @@ func TestDiscoveryAdvertisesIssuerAndEndpoints(t *testing.T) {
 	}
 }
 
-// A trailing slash on the issuer must not produce "//authorize".
 func TestDiscoveryHandlesIssuerWithPath(t *testing.T) {
 	p, _ := newTestProvider(t, "https://example.com/oidc")
 	doc := discoveryDoc(t, p)
@@ -87,6 +86,67 @@ func TestDiscoveryHandlesIssuerWithPath(t *testing.T) {
 	if strings.Contains(doc["jwks_uri"].(string), "//jwks") {
 		t.Errorf("jwks_uri has a doubled slash: %v", doc["jwks_uri"])
 	}
+}
+
+// A trailing slash on the issuer must not leak into the published metadata:
+// the issuer and the endpoints derived from it have to agree (RFC 8414 §3.3).
+func TestDiscoveryNormalisesTrailingSlashes(t *testing.T) {
+	p, _ := newTestProvider(t, "https://example.com//")
+	doc := discoveryDoc(t, p)
+
+	if got, want := doc["issuer"], "https://example.com"; got != want {
+		t.Errorf("issuer = %v, want %q", got, want)
+	}
+	if got, want := doc["authorization_endpoint"], "https://example.com/authorize"; got != want {
+		t.Errorf("authorization_endpoint = %v, want %q", got, want)
+	}
+}
+
+// Discovery is a promise: whatever URL it advertises, this server must answer
+// on. When the issuer carries a path the endpoints move with it, so mounting
+// the handlers at the server root would 404 every client that follows the
+// document — and a client that cannot fetch JWKS cannot verify any ID token.
+func TestAdvertisedEndpointsAreActuallyServed(t *testing.T) {
+	for _, issuer := range []string{"https://example.com", "https://example.com/oidc"} {
+		t.Run(issuer, func(t *testing.T) {
+			p, _ := newTestProvider(t, issuer)
+			doc := discoveryDoc(t, p)
+
+			mux := http.NewServeMux()
+			p.Register(mux)
+
+			for _, field := range []string{"jwks_uri"} {
+				advertised, _ := doc[field].(string)
+				u, err := url.Parse(advertised)
+				if err != nil {
+					t.Fatalf("%s = %q is not a URL: %v", field, advertised, err)
+				}
+
+				rec := httptest.NewRecorder()
+				mux.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, u.Path, nil))
+				if rec.Code != http.StatusOK {
+					t.Errorf("%s advertises %s but GET %s returned %d",
+						field, advertised, u.Path, rec.Code)
+				}
+			}
+
+			// The discovery document itself must sit under the issuer too.
+			rec := httptest.NewRecorder()
+			mux.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, u_path(t, issuer)+DiscoveryPath, nil))
+			if rec.Code != http.StatusOK {
+				t.Errorf("discovery is not served at %s%s", u_path(t, issuer), DiscoveryPath)
+			}
+		})
+	}
+}
+
+func u_path(t *testing.T, issuer string) string {
+	t.Helper()
+	u, err := url.Parse(issuer)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return strings.TrimRight(u.Path, "/")
 }
 
 func TestDiscoveryAdvertisesSupportedCapabilities(t *testing.T) {
