@@ -18,6 +18,9 @@ import (
 	"time"
 
 	"github.com/Ryback2501/Clerk/internal/config"
+	"github.com/Ryback2501/Clerk/internal/keys"
+	"github.com/Ryback2501/Clerk/internal/oidc"
+	"github.com/Ryback2501/Clerk/internal/store"
 )
 
 // Shutdown budget for in-flight requests once a signal arrives.
@@ -38,9 +41,24 @@ func run(logger *slog.Logger) error {
 		return fmt.Errorf("configuration: %w", err)
 	}
 
+	db, err := store.Open(cfg.DBPath)
+	if err != nil {
+		return fmt.Errorf("database: %w", err)
+	}
+	defer func() { _ = db.Close() }()
+
+	signer, err := keys.LoadOrGenerate(cfg.KeysPath)
+	if err != nil {
+		return fmt.Errorf("signing key: %w", err)
+	}
+	// The key id is safe to log; the key itself never is.
+	logger.Info("signing key ready", "kid", signer.KeyID(), "path", cfg.KeysPath)
+
+	provider := oidc.New(cfg.Issuer, signer).WithLogger(logger)
+
 	srv := &http.Server{
 		Addr:              cfg.ListenAddr,
-		Handler:           newHandler(),
+		Handler:           newHandler(provider),
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 
@@ -72,10 +90,12 @@ func run(logger *slog.Logger) error {
 	return nil
 }
 
-// newHandler builds the HTTP routes. Subsequent slices add the OIDC and admin
-// handlers here; for now it serves only the container health check.
-func newHandler() http.Handler {
+// newHandler builds the HTTP routes. The admin UI is mounted here in a later
+// slice; it is kept separate from the provider so that an admin-side failure
+// cannot affect token issuance.
+func newHandler(provider *oidc.Provider) http.Handler {
 	mux := http.NewServeMux()
+	provider.Register(mux)
 	mux.HandleFunc("GET /health", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
