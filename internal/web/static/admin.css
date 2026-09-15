@@ -82,7 +82,12 @@
 
 *, *::before, *::after { box-sizing: border-box; }
 
-html { -webkit-text-size-adjust: 100%; }
+/* The top bar is fixed over the page, so anything scrolled into view — by
+   focus, find-in-page or script — must stop below it rather than under it. */
+html {
+  -webkit-text-size-adjust: 100%;
+  scroll-padding-top: calc(var(--topbar-height) + 1rem);
+}
 
 body {
   margin: 0;
@@ -344,7 +349,7 @@ code.value { word-break: break-all; user-select: all; }
 
 .app-list { display: grid; gap: 1rem; }
 
-.app { overflow: hidden; scroll-margin-top: calc(var(--topbar-height) + 1rem); }
+.app { overflow: hidden; }
 .app[open] { box-shadow: var(--shadow); }
 
 .app-summary {
