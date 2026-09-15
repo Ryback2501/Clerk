@@ -1,4 +1,4 @@
-import { Page, expect } from "@playwright/test";
+import { Locator, Page, expect } from "@playwright/test";
 import { randomUUID } from "node:crypto";
 
 /**
@@ -12,46 +12,90 @@ export function uniqueName(prefix: string): string {
   return `${prefix} ${randomUUID().slice(0, 8)}`;
 }
 
+/** The list of applications, once it has finished loading. */
+export async function applicationList(page: Page): Promise<Locator> {
+  if (new URL(page.url()).pathname !== "/admin") {
+    await page.goto("/admin");
+  }
+  const list = page.locator("#applications");
+  await expect(list).not.toHaveAttribute("aria-busy", "true");
+  return list;
+}
+
+/** One application's foldable card. */
+export function applicationCard(page: Page, id: string): Locator {
+  return page.locator(`#applications details[data-app="${id}"]`);
+}
+
+/** Unfolds an application, if it is not already, and waits for its panel. */
+export async function openApplication(page: Page, id: string): Promise<Locator> {
+  await applicationList(page);
+  const card = applicationCard(page, id);
+  if (!(await card.evaluate((details: HTMLDetailsElement) => details.open))) {
+    await card.locator("summary").click();
+  }
+  await expect(card.locator(".panel")).toBeVisible();
+  return card;
+}
+
 /**
- * Registers an application through the admin UI and returns its credentials.
+ * Registers an application through the admin UI, adds a redirect URI to it,
+ * and returns its credentials.
  *
- * The client secret is shown exactly once, so it is read from the page that
- * immediately follows creation — reloading first would consume the reveal and
- * leave nothing to capture.
+ * The client secret is shown exactly once, in the unfolded card that follows
+ * creation, so it is read there before anything else can replace it.
  */
 export async function registerApplication(
   page: Page,
   name: string,
   redirectUri: string,
 ): Promise<{ clientId: string; clientSecret: string; id: string }> {
-  await page.goto("/admin/applications/new");
-  await page.getByLabel("Application name").fill(name);
-  await page.getByLabel("Redirect URIs").fill(redirectUri);
+  await page.goto("/admin");
+  await applicationList(page);
+
   await page.getByRole("button", { name: "Register application" }).click();
+  const dialog = page.getByRole("dialog", { name: "Register an application" });
+  await dialog.getByLabel("Application name").fill(name);
 
-  await expect(page.getByText("Copy it now")).toBeVisible();
+  const created = page.waitForResponse(
+    (r) => new URL(r.url()).pathname === "/admin/applications" && r.request().method() === "POST",
+  );
+  await dialog.getByRole("button", { name: "Create" }).click();
+  const response = await created;
+  expect(response.status()).toBe(201);
+  const id = response.headers()["x-clerk-application"];
 
-  const clientId = (await page.locator("dd code.value").first().innerText()).trim();
-  const clientSecret = (await page.locator("article code.value").first().innerText()).trim();
+  const card = applicationCard(page, id);
+  await expect(card).toHaveJSProperty("open", true);
+  await expect(card.getByText("Copy it now")).toBeVisible();
 
-  const id = new URL(page.url()).pathname.split("/").pop()!;
+  const clientId = (await card.locator(".credentials code.value").first().innerText()).trim();
+  const clientSecret = (await card.locator("code.secret").innerText()).trim();
+
+  await addRedirectUri(page, id, redirectUri);
   return { clientId, clientSecret, id };
 }
 
+/** Adds a redirect URI to an application. */
+export async function addRedirectUri(page: Page, id: string, uri: string) {
+  const card = await openApplication(page, id);
+  await card.getByLabel("Add a redirect URI").fill(uri);
+  await card.getByRole("button", { name: "Add redirect URI" }).click();
+  await expect(card.getByRole("cell", { name: uri, exact: true })).toBeVisible();
+}
+
 /** Adds a test user to an application. */
-export async function addUser(page: Page, applicationId: string, username: string) {
-  await page.goto(`/admin/applications/${applicationId}`);
-  await page.getByLabel("Add a test user").fill(username);
-  await page.getByRole("button", { name: "Add user" }).click();
-  await expect(page.getByRole("cell", { name: username, exact: true })).toBeVisible();
+export async function addUser(page: Page, id: string, username: string) {
+  const card = await openApplication(page, id);
+  await card.getByLabel("Add a test user").fill(username);
+  await card.getByRole("button", { name: "Add user" }).click();
+  await expect(card.getByRole("cell", { name: username, exact: true })).toBeVisible();
 }
 
 /**
- * The validation error shown on a page.
- *
- * Scoped to <main>, so an alert anywhere else in the layout can never be
- * mistaken for the form's own error.
+ * The validation error inside one application's panel, so an alert anywhere
+ * else can never be mistaken for it.
  */
-export function pageAlert(page: Page) {
-  return page.locator('main [role="alert"]');
+export function panelAlert(card: Locator): Locator {
+  return card.locator('.panel [role="alert"]');
 }

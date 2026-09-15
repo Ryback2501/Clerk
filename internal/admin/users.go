@@ -23,7 +23,8 @@ func (h *Handler) createUser(w http.ResponseWriter, r *http.Request, admin *admi
 			h.internalError(w, r, admin, "create user", err)
 			return
 		}
-		h.redisplayApplicationWithUserForm(w, r, admin, app.ID, username, err)
+		h.renderPanel(w, r, admin, app.ID, http.StatusUnprocessableEntity,
+			panelData{UserError: validationMessage(err), UserForm: username})
 		return
 	}
 
@@ -32,7 +33,7 @@ func (h *Handler) createUser(w http.ResponseWriter, r *http.Request, admin *admi
 	h.logger.InfoContext(r.Context(), "test user created",
 		"application_id", app.ID, "user_id", user.ID, "sub", user.Sub, "admin", admin.Subject)
 
-	http.Redirect(w, r, "/admin/applications/"+strconv.FormatInt(app.ID, 10), http.StatusSeeOther)
+	h.renderPanel(w, r, admin, app.ID, http.StatusOK, panelData{})
 }
 
 func (h *Handler) deleteUser(w http.ResponseWriter, r *http.Request, admin *adminauth.Admin) {
@@ -73,34 +74,5 @@ func (h *Handler) deleteUser(w http.ResponseWriter, r *http.Request, admin *admi
 	h.logger.InfoContext(r.Context(), "test user deleted",
 		"application_id", app.ID, "user_id", user.ID, "sub", user.Sub, "admin", admin.Subject)
 
-	http.Redirect(w, r, "/admin/applications/"+strconv.FormatInt(app.ID, 10), http.StatusSeeOther)
-}
-
-// redisplayApplicationWithUserForm re-renders the application page carrying a
-// validation error and the name that was rejected, so it need not be retyped.
-func (h *Handler) redisplayApplicationWithUserForm(w http.ResponseWriter, r *http.Request, admin *adminauth.Admin, appID int64, username string, cause error) {
-	app, users, err := h.applicationWithUsers(r, appID)
-	if err != nil {
-		h.internalError(w, r, admin, "load application", err)
-		return
-	}
-
-	data := h.newPageData(w, r, admin, app.Name)
-	data.Application = app
-	data.Users = users
-	data.UserError = validationMessage(cause)
-	data.UserForm = username
-	h.render(w, r, "application", http.StatusUnprocessableEntity, data)
-}
-
-func (h *Handler) applicationWithUsers(r *http.Request, appID int64) (*store.Application, []*store.User, error) {
-	app, err := h.store.GetApplication(r.Context(), appID)
-	if err != nil {
-		return nil, nil, err
-	}
-	users, err := h.store.ListUsers(r.Context(), appID)
-	if err != nil {
-		return nil, nil, err
-	}
-	return app, users, nil
+	h.renderPanel(w, r, admin, app.ID, http.StatusOK, panelData{})
 }

@@ -136,12 +136,17 @@ The full HTTP interface is described in [`docs/openapi.yaml`](docs/openapi.yaml)
 
 In the admin interface (`<ISSUER>/admin`):
 
-1. **Register application** with a name and one or more redirect URIs, one per line.
-   Each must be an absolute `http` or `https` URL with a host and no `#fragment`, and is
-   matched **exactly** at sign-in — a different port, path or trailing slash is refused.
-2. Copy the **client ID** and **client secret**. The secret is shown once; if it is lost,
-   regenerate it, which invalidates the old one.
-3. **Add test users**. These are the identities offered on the sign-in screen. An
+Everything happens on that one page: each application is a card that unfolds to show its
+credentials, redirect URIs, test users and a danger zone.
+
+1. **Register application** (below the list) and give it a name. The new application
+   appears unfolded, ready to set up.
+2. Copy the **client ID** and **client secret**. The secret is shown once, in that card,
+   until the page is reloaded; if it is lost, regenerate it, which invalidates the old one.
+3. **Add a redirect URI**. Each must be an absolute `http` or `https` URL with a host and
+   no `#fragment`, and is matched **exactly** at sign-in — a different port, path or
+   trailing slash is refused.
+4. **Add test users**. These are the identities offered on the sign-in screen. An
    application with no users cannot sign anyone in.
 
 ### 2. Configure the client

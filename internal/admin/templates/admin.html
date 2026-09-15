@@ -1,0 +1,19 @@
+{{define "content" -}}
+<div class="page-header">
+  <h3 class="page-title">Applications</h3>
+  <p class="text-muted">OpenID Connect clients registered with this provider. Unfold one to set it up.</p>
+</div>
+
+<section id="applications" class="app-list" aria-label="Applications" aria-busy="true" inert>
+  <div class="card list-placeholder">Loading applications…</div>
+</section>
+<noscript><p class="alert alert-warning">The administration interface needs JavaScript.</p></noscript>
+
+<div class="page-actions">
+  <button type="button" class="btn btn-inverse-primary" commandfor="register" command="show-modal">Register application</button>
+</div>
+
+<dialog id="register" class="modal" aria-labelledby="register-title">
+  {{template "register-form" .Register}}
+</dialog>
+{{- end}}

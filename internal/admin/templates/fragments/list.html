@@ -1,0 +1,25 @@
+{{define "list" -}}
+{{if .Applications}}
+{{range .Applications}}
+<details class="card app" data-app="{{.ID}}">
+  <summary class="app-summary">
+    <span class="app-chevron" aria-hidden="true"></span>
+    <span class="app-title">
+      <span class="app-name">{{.Name}}</span>
+      <code class="app-client-id">{{.ClientID}}</code>
+    </span>
+    <span class="app-meta">
+      <span class="badge badge-inverse-primary" data-user-count="{{.UserCount}}">{{.UserCount}} test {{if eq .UserCount 1}}user{{else}}users{{end}}</span>
+      <span class="app-created">{{.CreatedAt}}</span>
+    </span>
+  </summary>
+  <div class="app-panel" data-panel></div>
+</details>
+{{end}}
+{{else}}
+<div class="card empty-state">
+  <p class="empty-title">No applications yet.</p>
+  <p class="text-muted">Register one to get a client ID and secret.</p>
+</div>
+{{end}}
+{{- end}}

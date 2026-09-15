@@ -2,6 +2,7 @@ package admin
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -25,6 +26,11 @@ func (fakeAdmin) Authenticate(*http.Request) (*adminauth.Admin, error) {
 	return &adminauth.Admin{Subject: "test-admin", Provider: "test", Name: "Test administrator"}, nil
 }
 
+// refusingAdmin fails every authentication with a fixed error.
+type refusingAdmin struct{ err error }
+
+func (a refusingAdmin) Authenticate(*http.Request) (*adminauth.Admin, error) { return nil, a.err }
+
 type harness struct {
 	t     *testing.T
 	mux   *http.ServeMux
@@ -38,13 +44,18 @@ type harness struct {
 
 func newHarness(t *testing.T) *harness {
 	t.Helper()
+	return newHarnessWith(t, fakeAdmin{})
+}
+
+func newHarnessWith(t *testing.T, auth adminauth.Authenticator) *harness {
+	t.Helper()
 	s, err := store.Open(filepath.Join(t.TempDir(), "clerk.db"))
 	if err != nil {
 		t.Fatalf("open store: %v", err)
 	}
 	t.Cleanup(func() { _ = s.Close() })
 
-	h, err := newHandler(s, fakeAdmin{}, nil)
+	h, err := newHandler(s, auth, nil)
 	if err != nil {
 		t.Fatalf("newHandler(): %v", err)
 	}
@@ -72,17 +83,28 @@ func (h *harness) do(req *http.Request) *httptest.ResponseRecorder {
 	return rec
 }
 
-func (h *harness) get(path string) *httptest.ResponseRecorder {
+// page requests a full page, the way a browser navigation does.
+func (h *harness) page(path string) *httptest.ResponseRecorder {
 	h.t.Helper()
 	return h.do(httptest.NewRequest(http.MethodGet, path, nil))
 }
 
-// post submits a form, first fetching a page to pick up a valid CSRF token.
+// get requests a fragment, the way the admin script does.
+func (h *harness) get(path string) *httptest.ResponseRecorder {
+	h.t.Helper()
+	req := httptest.NewRequest(http.MethodGet, path, nil)
+	req.Header.Set(fragmentHeader, "1")
+	return h.do(req)
+}
+
+// post submits a form as the admin script does, first fetching the shell to
+// pick up a valid CSRF token.
 func (h *harness) post(path string, form url.Values) *httptest.ResponseRecorder {
 	h.t.Helper()
 	form.Set(web.CSRFFieldName, h.csrfToken())
 	req := httptest.NewRequest(http.MethodPost, path, strings.NewReader(form.Encode()))
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.Header.Set(fragmentHeader, "1")
 	return h.do(req)
 }
 
@@ -90,104 +112,44 @@ var csrfPattern = regexp.MustCompile(`name="csrf_token" value="([^"]+)"`)
 
 func (h *harness) csrfToken() string {
 	h.t.Helper()
-	body := h.get("/admin/applications/new").Body.String()
+	body := h.page("/admin").Body.String()
 	m := csrfPattern.FindStringSubmatch(body)
 	if m == nil {
-		h.t.Fatal("no CSRF token found in the form")
+		h.t.Fatal("no CSRF token found in the shell")
 	}
 	return m[1]
 }
 
-func (h *harness) createApp(name string, uris string) int64 {
+// createApp registers an application and optionally adds redirect URIs to it,
+// returning its id and the secret shown in the creation response.
+func (h *harness) createApp(name string, uris ...string) int64 {
 	h.t.Helper()
-	rec := h.post("/admin/applications", url.Values{"name": {name}, "redirect_uris": {uris}})
-	if rec.Code != http.StatusSeeOther {
-		h.t.Fatalf("create returned %d, want 303: %s", rec.Code, rec.Body.String())
+	id, _ := h.createAppWithSecret(name, uris...)
+	return id
+}
+
+func (h *harness) createAppWithSecret(name string, uris ...string) (int64, string) {
+	h.t.Helper()
+	rec := h.post("/admin/applications", url.Values{"name": {name}})
+	if rec.Code != http.StatusCreated {
+		h.t.Fatalf("create returned %d, want 201: %s", rec.Code, rec.Body.String())
 	}
-	apps, err := h.store.ListApplications(context.Background())
+	id, err := strconv.ParseInt(rec.Header().Get(createdHeader), 10, 64)
 	if err != nil {
-		h.t.Fatal(err)
+		h.t.Fatalf("create response carries no usable %s header: %v", createdHeader, err)
 	}
-	for _, a := range apps {
-		if a.Name == name {
-			return a.ID
+	for _, uri := range uris {
+		if got := h.post(appPath(id)+"/redirect-uris", url.Values{"uri": {uri}}); got.Code != http.StatusOK {
+			h.t.Fatalf("add redirect uri returned %d: %s", got.Code, got.Body.String())
 		}
 	}
-	h.t.Fatalf("application %q was not created", name)
-	return 0
+	return id, extractSecret(rec.Body.String())
 }
 
-func TestListApplicationsRendersEmptyState(t *testing.T) {
-	h := newHarness(t)
+var secretPattern = regexp.MustCompile(`<code class="value secret">([A-Za-z0-9_-]{40,})</code>`)
 
-	rec := h.get("/admin")
-	if rec.Code != http.StatusOK {
-		t.Fatalf("GET /admin = %d, want 200", rec.Code)
-	}
-	if !strings.Contains(rec.Body.String(), "No applications yet") {
-		t.Error("the empty state is not shown")
-	}
-}
-
-// Acceptance criteria 1, 2, 3, 5.
-func TestCreateApplicationShowsTheSecretExactlyOnce(t *testing.T) {
-	h := newHarness(t)
-
-	rec := h.post("/admin/applications", url.Values{
-		"name":          {"My Test Application"},
-		"redirect_uris": {"https://app.example.com/cb"},
-	})
-	if rec.Code != http.StatusSeeOther {
-		t.Fatalf("create returned %d, want a 303 redirect: %s", rec.Code, rec.Body.String())
-	}
-	location := rec.Header().Get("Location")
-
-	// The secret must not travel in the URL, where it would reach access logs
-	// and referrer headers.
-	if strings.Contains(location, "secret") || len(location) > 60 {
-		t.Errorf("Location %q looks like it carries the secret", location)
-	}
-
-	page := h.get(location)
-	if page.Code != http.StatusOK {
-		t.Fatalf("GET %s = %d, want 200", location, page.Code)
-	}
-	body := page.Body.String()
-	if !strings.Contains(body, "Client secret") || !strings.Contains(body, "Copy it now") {
-		t.Fatal("the freshly created secret was not displayed")
-	}
-
-	shown := extractSecret(t, body)
-	if shown == "" {
-		t.Fatal("could not find the displayed secret")
-	}
-
-	// It verifies against what was stored...
-	apps, _ := h.store.ListApplications(context.Background())
-	ok, err := h.store.VerifyClientSecret(context.Background(), apps[0].ID, shown)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !ok {
-		t.Error("the displayed secret does not match the stored hash")
-	}
-
-	// ...and a refresh must never show it again.
-	again := h.get(location).Body.String()
-	if strings.Contains(again, shown) {
-		t.Error("the client secret was shown a second time on reload")
-	}
-	if strings.Contains(again, "Copy it now") {
-		t.Error("the one-time secret panel is still rendered on reload")
-	}
-}
-
-var secretPattern = regexp.MustCompile(`<code class="value">([A-Za-z0-9_-]{40,})</code>`)
-
-func extractSecret(t *testing.T, body string) string {
-	t.Helper()
-	i := strings.Index(body, "Copy it now")
-	if i < 0 {
+func extractSecret(body string) string {
+	if !strings.Contains(body, "Copy it now") {
 		return ""
 	}
 	m := secretPattern.FindStringSubmatch(body)
@@ -197,23 +159,267 @@ func extractSecret(t *testing.T, body string) string {
 	return m[1]
 }
 
-func TestCreateApplicationRejectsInvalidInputWithoutLosingIt(t *testing.T) {
+func appPath(id int64) string { return "/admin/applications/" + itoa(id) }
+
+func itoa(i int64) string { return strconv.FormatInt(i, 10) }
+
+func seedUsers(t *testing.T, h *harness, appID int64, n int) {
+	t.Helper()
+	for i := range n {
+		if _, err := h.store.DB().Exec(
+			`INSERT INTO users (application_id, username, sub) VALUES (?, ?, ?)`,
+			appID, "user"+itoa(int64(i)), "sub-"+itoa(appID)+"-"+itoa(int64(i))); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+// The shell is the only page. Everything about applications arrives later, on
+// demand, so the page itself must carry none of it.
+func TestShellCarriesNoApplicationData(t *testing.T) {
+	h := newHarness(t)
+	id := h.createApp("Shell Test Application", "https://shell.example.com/cb")
+
+	rec := h.page("/admin")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET /admin = %d, want 200", rec.Code)
+	}
+	body := rec.Body.String()
+	for _, want := range []string{`id="applications"`, `<dialog id="register"`, "/static/admin.js", "/static/admin.css", "Register application"} {
+		if !strings.Contains(body, want) {
+			t.Errorf("the shell does not contain %q", want)
+		}
+	}
+	for _, leak := range []string{"Shell Test Application", "https://shell.example.com/cb", `data-app="` + itoa(id) + `"`} {
+		if strings.Contains(body, leak) {
+			t.Errorf("the shell already contains application data %q", leak)
+		}
+	}
+}
+
+// The register button sits below the list, not above it.
+func TestRegisterButtonFollowsTheList(t *testing.T) {
+	h := newHarness(t)
+	body := h.page("/admin").Body.String()
+
+	list := strings.Index(body, `id="applications"`)
+	button := strings.Index(body, `commandfor="register"`)
+	if list < 0 || button < 0 {
+		t.Fatalf("list at %d, register button at %d; both must be present", list, button)
+	}
+	if button < list {
+		t.Error("the Register application button is placed above the list")
+	}
+}
+
+func TestShellSecurityHeaders(t *testing.T) {
+	h := newHarness(t)
+	rec := h.page("/admin")
+
+	csp := rec.Header().Get("Content-Security-Policy")
+	for _, want := range []string{"default-src 'none'", "script-src 'self'", "connect-src 'self'", "style-src 'self'", "font-src 'self'", "frame-ancestors 'none'"} {
+		if !strings.Contains(csp, want) {
+			t.Errorf("CSP %q lacks %q", csp, want)
+		}
+	}
+	if strings.Contains(csp, "unsafe-inline") {
+		t.Errorf("CSP %q allows inline code", csp)
+	}
+	if got := rec.Header().Get("Cache-Control"); got != "no-store" {
+		t.Errorf("Cache-Control = %q, want no-store", got)
+	}
+}
+
+// Pico guarded its dark palette with :root:not([data-theme]), and the admin
+// stylesheet follows the same convention, so emitting any data-theme value at
+// all would pin the UI to light mode regardless of the reader's preference.
+func TestPageDoesNotPinTheColourTheme(t *testing.T) {
+	h := newHarness(t)
+	if strings.Contains(h.page("/admin").Body.String(), "data-theme") {
+		t.Error("the page sets data-theme, which disables automatic dark mode")
+	}
+}
+
+func TestAdminTrailingSlashReachesTheInterface(t *testing.T) {
+	h := newHarness(t)
+	rec := h.page("/admin/")
+	if rec.Code != http.StatusOK && rec.Code != http.StatusMovedPermanently {
+		t.Errorf("GET /admin/ = %d, want the interface or a redirect to it", rec.Code)
+	}
+}
+
+func TestListRendersEmptyState(t *testing.T) {
 	h := newHarness(t)
 
-	rec := h.post("/admin/applications", url.Values{
-		"name":          {"My App"},
-		"redirect_uris": {"not-a-url"},
-	})
+	rec := h.get("/admin/applications")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET /admin/applications = %d, want 200", rec.Code)
+	}
+	if !strings.Contains(rec.Body.String(), "No applications yet") {
+		t.Error("the empty state is not shown")
+	}
+}
+
+// The list carries only what a folded application shows. An application's
+// inner data is requested when it is unfolded, never in advance.
+func TestListCarriesSummariesButNoInnerData(t *testing.T) {
+	h := newHarness(t)
+	id := h.createApp("Listed Application", "https://listed.example.com/cb")
+	seedUsers(t, h, id, 2)
+	app, _ := h.store.GetApplication(context.Background(), id)
+
+	body := h.get("/admin/applications").Body.String()
+	for _, want := range []string{"Listed Application", app.ClientID, `data-app="` + itoa(id) + `"`, `data-user-count="2"`} {
+		if !strings.Contains(body, want) {
+			t.Errorf("the list does not contain %q", want)
+		}
+	}
+	for _, inner := range []string{"https://listed.example.com/cb", "user0", "sub-" + itoa(id) + "-0", "Danger zone"} {
+		if strings.Contains(body, inner) {
+			t.Errorf("the list already contains inner data %q", inner)
+		}
+	}
+	if strings.Contains(body, "<details open") || strings.Contains(body, " open>") {
+		t.Error("an application is rendered unfolded in the list")
+	}
+}
+
+func TestPanelCarriesTheApplicationsInnerData(t *testing.T) {
+	h := newHarness(t)
+	id := h.createApp("Panel Application", "https://panel.example.com/cb")
+	seedUsers(t, h, id, 1)
+	app, _ := h.store.GetApplication(context.Background(), id)
+
+	rec := h.get(appPath(id))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET %s = %d, want 200", appPath(id), rec.Code)
+	}
+	body := rec.Body.String()
+	for _, want := range []string{
+		"Credentials", "Redirect URIs", "Test users", "Danger zone",
+		app.ClientID, "https://panel.example.com/cb", "user0", "sub-" + itoa(id) + "-0",
+		`data-user-count="1"`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("the panel does not contain %q", want)
+		}
+	}
+	if strings.Contains(body, "<html") {
+		t.Error("a fragment was wrapped in the page layout")
+	}
+}
+
+// A fragment is meaningless as a page. Someone who opens its URL directly is
+// sent to the interface, and a form posted without the script changes nothing.
+func TestFragmentRoutesAnswerOnlyTheAdminScript(t *testing.T) {
+	h := newHarness(t)
+	id := h.createApp("App")
+
+	for _, path := range []string{"/admin/applications", appPath(id)} {
+		rec := h.page(path)
+		if rec.Code != http.StatusSeeOther || rec.Header().Get("Location") != "/admin" {
+			t.Errorf("a browser visit to %s = %d → %q, want 303 → /admin", path, rec.Code, rec.Header().Get("Location"))
+		}
+	}
+
+	form := url.Values{"name": {"Posted without the script"}, web.CSRFFieldName: {h.csrfToken()}}
+	req := httptest.NewRequest(http.MethodPost, "/admin/applications", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	if rec := h.do(req); rec.Code != http.StatusSeeOther {
+		t.Errorf("a plain form post = %d, want 303", rec.Code)
+	}
+	apps, _ := h.store.ListApplications(context.Background())
+	if len(apps) != 1 {
+		t.Errorf("a plain form post created an application: %d exist, want 1", len(apps))
+	}
+}
+
+// The script cannot follow a redirect to a sign-in page and render it as a
+// fragment, so fragment requests learn about authorization as status codes.
+func TestFragmentAuthorizationFailuresAreStatusCodes(t *testing.T) {
+	for _, tc := range []struct {
+		err  error
+		want int
+		text string
+	}{
+		{adminauth.ErrUnauthenticated, http.StatusUnauthorized, "sign in"},
+		{adminauth.ErrForbidden, http.StatusForbidden, "role"},
+		{fmt.Errorf("%w: bouncer down", adminauth.ErrUnavailable), http.StatusServiceUnavailable, "OpenID Connect endpoints are unaffected"},
+	} {
+		t.Run(tc.err.Error(), func(t *testing.T) {
+			h := newHarnessWith(t, refusingAdmin{err: tc.err})
+			rec := h.get("/admin/applications")
+			if rec.Code != tc.want {
+				t.Fatalf("got %d, want %d", rec.Code, tc.want)
+			}
+			body := rec.Body.String()
+			if strings.Contains(body, "<html") {
+				t.Error("the failure was rendered as a whole page instead of a fragment")
+			}
+			if !strings.Contains(body, tc.text) {
+				t.Errorf("the failure does not mention %q: %s", tc.text, body)
+			}
+		})
+	}
+}
+
+// Acceptance criteria 1, 2, 3, 5: the secret is shown once, in the response
+// to the request that generated it, and no request can ever fetch it again.
+func TestCreateApplicationShowsTheSecretExactlyOnce(t *testing.T) {
+	h := newHarness(t)
+
+	rec := h.post("/admin/applications", url.Values{"name": {"My Test Application"}})
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("create returned %d, want 201: %s", rec.Code, rec.Body.String())
+	}
+	if got := rec.Header().Get("Location"); got != "" {
+		t.Errorf("create sets Location %q; the admin never leaves /admin", got)
+	}
+	if got := rec.Header().Get("Cache-Control"); got != "no-store" {
+		t.Errorf("the response carrying the secret has Cache-Control %q, want no-store", got)
+	}
+
+	id, err := strconv.ParseInt(rec.Header().Get(createdHeader), 10, 64)
+	if err != nil {
+		t.Fatalf("no usable %s header: %v", createdHeader, err)
+	}
+	body := rec.Body.String()
+	if !strings.Contains(body, "Danger zone") {
+		t.Error("the create response is not the new application's panel")
+	}
+	shown := extractSecret(body)
+	if shown == "" {
+		t.Fatal("the freshly created secret was not displayed")
+	}
+	ok, err := h.store.VerifyClientSecret(context.Background(), id, shown)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !ok {
+		t.Error("the displayed secret does not match the stored hash")
+	}
+
+	for _, path := range []string{"/admin", "/admin/applications", appPath(id)} {
+		again := h.get(path).Body.String()
+		if strings.Contains(again, shown) || strings.Contains(again, "Copy it now") {
+			t.Errorf("GET %s shows the client secret again", path)
+		}
+	}
+}
+
+func TestCreateApplicationRequiresAName(t *testing.T) {
+	h := newHarness(t)
+
+	rec := h.post("/admin/applications", url.Values{"name": {"   "}})
 	if rec.Code != http.StatusUnprocessableEntity {
 		t.Fatalf("got %d, want 422", rec.Code)
 	}
 	body := rec.Body.String()
-	// The form must come back populated, not blank.
-	if !strings.Contains(body, "My App") {
-		t.Error("the submitted name was discarded on validation failure")
+	if !strings.Contains(body, "must not be empty") {
+		t.Error("the error does not say the name is required")
 	}
-	if !strings.Contains(body, "not-a-url") {
-		t.Error("the submitted redirect URIs were discarded on validation failure")
+	if !strings.Contains(body, `name="name"`) || !strings.Contains(body, "required") {
+		t.Error("the response is not the register form, or the input is not required")
 	}
 
 	apps, _ := h.store.ListApplications(context.Background())
@@ -225,19 +431,19 @@ func TestCreateApplicationRejectsInvalidInputWithoutLosingIt(t *testing.T) {
 // Acceptance criterion 6.
 func TestRegenerateSecretShowsANewSecretOnce(t *testing.T) {
 	h := newHarness(t)
-	id := h.createApp("App", "https://a.example.com/cb")
+	id, first := h.createAppWithSecret("App")
 
-	rec := h.post("/admin/applications/"+itoa(id)+"/secret", url.Values{})
-	if rec.Code != http.StatusSeeOther {
-		t.Fatalf("regenerate returned %d, want 303", rec.Code)
+	rec := h.post(appPath(id)+"/secret", url.Values{})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("regenerate returned %d, want 200", rec.Code)
 	}
-
-	body := h.get(rec.Header().Get("Location")).Body.String()
-	shown := extractSecret(t, body)
+	shown := extractSecret(rec.Body.String())
 	if shown == "" {
 		t.Fatal("the regenerated secret was not displayed")
 	}
-
+	if shown == first {
+		t.Error("regenerating returned the previous secret")
+	}
 	ok, err := h.store.VerifyClientSecret(context.Background(), id, shown)
 	if err != nil {
 		t.Fatal(err)
@@ -245,55 +451,89 @@ func TestRegenerateSecretShowsANewSecretOnce(t *testing.T) {
 	if !ok {
 		t.Error("the displayed regenerated secret does not match the stored hash")
 	}
+
+	if strings.Contains(h.get(appPath(id)).Body.String(), shown) {
+		t.Error("the regenerated secret is shown again by a later request")
+	}
+}
+
+// Only the response to a secret-generating request may carry a secret. Every
+// other panel response must not, or a later edit would re-display it.
+func TestOtherPanelResponsesCarryNoSecret(t *testing.T) {
+	h := newHarness(t)
+	id, shown := h.createAppWithSecret("App")
+
+	rec := h.post(appPath(id)+"/redirect-uris", url.Values{"uri": {"https://x.example.com/cb"}})
+	if strings.Contains(rec.Body.String(), shown) || strings.Contains(rec.Body.String(), "Copy it now") {
+		t.Error("adding a redirect uri re-displayed the client secret")
+	}
 }
 
 // Acceptance criterion 7.
 func TestAddAndRemoveRedirectURIs(t *testing.T) {
 	h := newHarness(t)
 	id := h.createApp("App", "https://a.example.com/cb")
-	base := "/admin/applications/" + itoa(id)
+	base := appPath(id)
 
-	if rec := h.post(base+"/redirect-uris", url.Values{"uri": {"https://b.example.com/cb"}}); rec.Code != http.StatusSeeOther {
-		t.Fatalf("add returned %d, want 303", rec.Code)
+	rec := h.post(base+"/redirect-uris", url.Values{"uri": {"https://b.example.com/cb"}})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("add returned %d, want 200", rec.Code)
 	}
-	if body := h.get(base).Body.String(); !strings.Contains(body, "https://b.example.com/cb") {
-		t.Error("the added redirect URI is not listed")
-	}
-
-	if rec := h.post(base+"/redirect-uris/remove", url.Values{"uri": {"https://a.example.com/cb"}}); rec.Code != http.StatusSeeOther {
-		t.Fatalf("remove returned %d, want 303", rec.Code)
-	}
-	if body := h.get(base).Body.String(); strings.Contains(body, "https://a.example.com/cb") {
-		t.Error("the removed redirect URI is still listed")
+	if !strings.Contains(rec.Body.String(), "https://b.example.com/cb") {
+		t.Error("the refreshed panel does not list the added redirect URI")
 	}
 
-	if rec := h.post(base+"/redirect-uris", url.Values{"uri": {"javascript:alert(1)"}}); rec.Code == http.StatusSeeOther {
-		t.Error("a non-http redirect URI was accepted")
+	rec = h.post(base+"/redirect-uris/remove", url.Values{"uri": {"https://a.example.com/cb"}})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("remove returned %d, want 200", rec.Code)
+	}
+	if strings.Contains(rec.Body.String(), "https://a.example.com/cb") {
+		t.Error("the refreshed panel still lists the removed redirect URI")
+	}
+
+	rec = h.post(base+"/redirect-uris", url.Values{"uri": {"javascript:alert(1)"}})
+	if rec.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("a non-http redirect URI returned %d, want 422", rec.Code)
+	}
+	body := rec.Body.String()
+	if !strings.Contains(body, "redirect uri") {
+		t.Error("the panel does not explain the rejected redirect URI")
+	}
+	if !strings.Contains(body, `value="javascript:alert(1)"`) {
+		t.Error("the rejected redirect URI was not kept in the form")
+	}
+	app, _ := h.store.GetApplication(context.Background(), id)
+	if len(app.RedirectURIs) != 1 {
+		t.Errorf("redirect URIs = %v, want only the one added", app.RedirectURIs)
 	}
 }
 
 // Acceptance criterion 27: the confirmation must say what else will be destroyed.
 func TestDeleteConfirmationWarnsAboutUsers(t *testing.T) {
 	h := newHarness(t)
-	id := h.createApp("Doomed", "https://a.example.com/cb")
+	id := h.createApp("Doomed")
 	seedUsers(t, h, id, 3)
 
-	body := h.get("/admin/applications/" + itoa(id) + "/delete").Body.String()
+	body := h.get(appPath(id)).Body.String()
+	dialog := body[max(strings.Index(body, `<dialog id="delete-`+itoa(id)+`"`), 0):]
+	if !strings.HasPrefix(dialog, "<dialog") {
+		t.Fatal("the panel has no delete confirmation dialog")
+	}
 	for _, want := range []string{"permanently delete", "test users", "cannot be undone", "3"} {
-		if !strings.Contains(body, want) {
-			t.Errorf("the confirmation page does not mention %q", want)
+		if !strings.Contains(dialog, want) {
+			t.Errorf("the confirmation does not mention %q", want)
 		}
 	}
 }
 
 func TestDeleteApplicationRemovesItAndItsUsers(t *testing.T) {
 	h := newHarness(t)
-	id := h.createApp("Doomed", "https://a.example.com/cb")
+	id := h.createApp("Doomed")
 	seedUsers(t, h, id, 2)
 
-	rec := h.post("/admin/applications/"+itoa(id)+"/delete", url.Values{})
-	if rec.Code != http.StatusSeeOther {
-		t.Fatalf("delete returned %d, want 303", rec.Code)
+	rec := h.post(appPath(id)+"/delete", url.Values{})
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("delete returned %d, want 204", rec.Code)
 	}
 
 	if _, err := h.store.GetApplication(context.Background(), id); err == nil {
@@ -312,7 +552,7 @@ func TestDeleteApplicationRemovesItAndItsUsers(t *testing.T) {
 func TestStateChangingRoutesRequireCSRF(t *testing.T) {
 	h := newHarness(t)
 	id := h.createApp("App", "https://a.example.com/cb")
-	base := "/admin/applications/" + itoa(id)
+	base := appPath(id)
 
 	for _, path := range []string{
 		"/admin/applications",
@@ -322,8 +562,7 @@ func TestStateChangingRoutesRequireCSRF(t *testing.T) {
 		base + "/delete",
 	} {
 		t.Run(path, func(t *testing.T) {
-			req := httptest.NewRequest(http.MethodPost, path, strings.NewReader("name=x&uri=https://x.example.com/cb"))
-			req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+			req := newForm(http.MethodPost, path, "name=x&uri=https://x.example.com/cb")
 			// Deliberately no cookies and no token.
 			rec := httptest.NewRecorder()
 			h.mux.ServeHTTP(rec, req)
@@ -337,118 +576,37 @@ func TestStateChangingRoutesRequireCSRF(t *testing.T) {
 
 func TestUnknownApplicationIsNotFound(t *testing.T) {
 	h := newHarness(t)
-	for _, path := range []string{"/admin/applications/4242", "/admin/applications/4242/delete"} {
+	for _, path := range []string{"/admin/applications/4242", "/admin/applications/not-a-number", "/admin/applications/new"} {
 		if rec := h.get(path); rec.Code != http.StatusNotFound {
 			t.Errorf("GET %s = %d, want 404", path, rec.Code)
 		}
 	}
-	if rec := h.get("/admin/applications/not-a-number"); rec.Code != http.StatusNotFound {
-		t.Errorf("a non-numeric id returned %d, want 404", rec.Code)
+	if rec := h.post("/admin/applications/4242/secret", url.Values{}); rec.Code != http.StatusNotFound {
+		t.Errorf("POST to an unknown application = %d, want 404", rec.Code)
+	}
+}
+
+// The confirmation is a dialog now; the page it used to be is gone.
+func TestDeleteConfirmationPageIsGone(t *testing.T) {
+	h := newHarness(t)
+	id := h.createApp("App")
+	if rec := h.get(appPath(id) + "/delete"); rec.Code == http.StatusOK {
+		t.Errorf("GET %s/delete = 200; the confirmation page should no longer exist", appPath(id))
 	}
 }
 
 // The admin UI renders user-supplied names, so escaping must be active.
 func TestApplicationNameIsEscaped(t *testing.T) {
 	h := newHarness(t)
-	h.createApp(`<script>alert("xss")</script>`, "https://a.example.com/cb")
+	id := h.createApp(`<script>alert("xss")</script>`)
 
-	body := h.get("/admin").Body.String()
-	if strings.Contains(body, "<script>alert") {
-		t.Error("the application name was rendered unescaped")
-	}
-	if !strings.Contains(body, "&lt;script&gt;") {
-		t.Error("the escaped name is not present")
-	}
-}
-
-func seedUsers(t *testing.T, h *harness, appID int64, n int) {
-	t.Helper()
-	for i := range n {
-		if _, err := h.store.DB().Exec(
-			`INSERT INTO users (application_id, username, sub) VALUES (?, ?, ?)`,
-			appID, "user"+itoa(int64(i)), "sub-"+itoa(appID)+"-"+itoa(int64(i))); err != nil {
-			t.Fatal(err)
+	for _, path := range []string{"/admin/applications", appPath(id)} {
+		body := h.get(path).Body.String()
+		if strings.Contains(body, "<script>alert") {
+			t.Errorf("GET %s rendered the application name unescaped", path)
 		}
-	}
-}
-
-func itoa(i int64) string { return strconv.FormatInt(i, 10) }
-
-// The one-time secret must appear only on the application it belongs to. The
-// invariant is about the secret's value, not about whether a page renders the
-// panel: each application has its own pending reveal, and both are legitimate.
-func TestRevealedSecretDoesNotLeakOntoAnotherApplication(t *testing.T) {
-	h := newHarness(t)
-	first := h.createApp("First", "https://a.example.com/cb")
-	second := h.createApp("Second", "https://b.example.com/cb")
-
-	firstSecret := extractSecret(t, h.get("/admin/applications/"+itoa(first)).Body.String())
-	if firstSecret == "" {
-		t.Fatal("the first application's secret was never displayed")
-	}
-
-	secondPage := h.get("/admin/applications/" + itoa(second)).Body.String()
-	if strings.Contains(secondPage, firstSecret) {
-		t.Error("one application's secret was rendered on another application's page")
-	}
-
-	secondSecret := extractSecret(t, secondPage)
-	if secondSecret == "" {
-		t.Fatal("the second application's secret was never displayed")
-	}
-	if secondSecret == firstSecret {
-		t.Error("both applications were issued the same secret")
-	}
-
-	// Each is still single-use.
-	for _, id := range []int64{first, second} {
-		if strings.Contains(h.get("/admin/applications/"+itoa(id)).Body.String(), "Copy it now") {
-			t.Errorf("application %d showed its secret a second time", id)
-		}
-	}
-}
-
-// Pico guards its dark palette with :root:not([data-theme]), so emitting any
-// data-theme value at all pins the UI to light mode regardless of the reader's
-// system preference.
-func TestPageDoesNotPinTheColourTheme(t *testing.T) {
-	h := newHarness(t)
-	body := h.get("/admin").Body.String()
-
-	if strings.Contains(body, "data-theme") {
-		t.Error("the page sets data-theme, which disables Pico's automatic dark mode")
-	}
-}
-
-// Two secrets generated before either is viewed must both remain reachable.
-// A single cookie slot would let the second overwrite the first, leaving an
-// application whose old secret is already invalidated and whose new one can
-// never be displayed.
-func TestTwoPendingSecretsAreBothReachable(t *testing.T) {
-	h := newHarness(t)
-	first := h.createApp("First", "https://a.example.com/cb")
-	second := h.createApp("Second", "https://b.example.com/cb")
-
-	// Regenerate both before viewing either.
-	for _, id := range []int64{first, second} {
-		if rec := h.post("/admin/applications/"+itoa(id)+"/secret", url.Values{}); rec.Code != http.StatusSeeOther {
-			t.Fatalf("regenerate for %d returned %d", id, rec.Code)
-		}
-	}
-
-	for _, id := range []int64{first, second} {
-		body := h.get("/admin/applications/" + itoa(id)).Body.String()
-		shown := extractSecret(t, body)
-		if shown == "" {
-			t.Errorf("application %d: the regenerated secret was not displayed", id)
-			continue
-		}
-		ok, err := h.store.VerifyClientSecret(context.Background(), id, shown)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if !ok {
-			t.Errorf("application %d: the displayed secret does not match the stored hash", id)
+		if !strings.Contains(body, "&lt;script&gt;") {
+			t.Errorf("GET %s does not contain the escaped name", path)
 		}
 	}
 }
@@ -457,14 +615,14 @@ func TestTwoPendingSecretsAreBothReachable(t *testing.T) {
 // were their own input mistake.
 func TestInternalFailureIsNotReportedAsValidation(t *testing.T) {
 	h := newHarness(t)
-	id := h.createApp("App", "https://a.example.com/cb")
+	id := h.createApp("App")
 
 	// Closing the database makes every subsequent query fail.
 	if err := h.store.Close(); err != nil {
 		t.Fatal(err)
 	}
 
-	rec := h.get("/admin/applications/" + itoa(id))
+	rec := h.get(appPath(id))
 	if rec.Code != http.StatusInternalServerError {
 		t.Errorf("a database failure returned %d, want 500", rec.Code)
 	}
@@ -473,18 +631,54 @@ func TestInternalFailureIsNotReportedAsValidation(t *testing.T) {
 	}
 }
 
-func TestAdminTrailingSlashReachesTheInterface(t *testing.T) {
-	h := newHarness(t)
-	rec := h.get("/admin/")
-	if rec.Code != http.StatusOK && rec.Code != http.StatusMovedPermanently {
-		t.Errorf("GET /admin/ = %d, want the interface or a redirect to it", rec.Code)
+func TestSignInOffersOnlyConfiguredProviders(t *testing.T) {
+	h, err := newHandler(nil, refusingAdmin{err: adminauth.ErrUnauthenticated}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, signInPath, nil)
+	rec := httptest.NewRecorder()
+	data := h.newPageData(rec, req, nil, "Sign in")
+	data.Providers = providerButtonsFor([]string{"github"})
+	h.render(rec, req, "signin", http.StatusOK, data)
+
+	body := rec.Body.String()
+	if !strings.Contains(body, "Continue with GitHub") || !strings.Contains(body, `href="/admin/auth/github/start"`) {
+		t.Error("the configured provider has no sign-in button")
+	}
+	for _, absent := range []string{"Google", "Microsoft", "LinkedIn"} {
+		if strings.Contains(body, absent) {
+			t.Errorf("an unconfigured provider, %s, is offered", absent)
+		}
+	}
+}
+
+func TestProviderButtons(t *testing.T) {
+	got := providerButtonsFor([]string{"google", "microsoft", "linkedin", "github", "acme"})
+	want := []struct{ id, label string }{
+		{"google", "Continue with Google"},
+		{"microsoft", "Continue with Microsoft"},
+		{"linkedin", "Continue with LinkedIn"},
+		{"github", "Continue with GitHub"},
+		{"acme", "Continue with acme"},
+	}
+	if len(got) != len(want) {
+		t.Fatalf("got %d buttons, want %d", len(got), len(want))
+	}
+	for i, w := range want {
+		if got[i].ID != w.id || got[i].Label != w.label {
+			t.Errorf("button %d = {%q, %q}, want {%q, %q}", i, got[i].ID, got[i].Label, w.id, w.label)
+		}
+	}
+	if got[4].Icon != "" {
+		t.Error("an unknown provider was given another provider's icon")
 	}
 }
 
 func newForm(method, path, body string) *http.Request {
 	req := httptest.NewRequest(method, path, strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.Header.Set(fragmentHeader, "1")
 	return req
 }
-
-func newRecorder() *httptest.ResponseRecorder { return httptest.NewRecorder() }

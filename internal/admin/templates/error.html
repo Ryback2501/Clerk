@@ -1,7 +1,13 @@
 {{define "content" -}}
-<hgroup>
-  <h1>{{.Title}}</h1>
-  <p>{{.Error}}</p>
-</hgroup>
-<p><a href="/admin" role="button" class="secondary">Back to applications</a></p>
+{{if .Admin}}
+<section class="card page-card">
+  <h4 class="card-title">{{.Title}}</h4>
+  <p class="text-muted">{{.Error}}</p>
+  <a href="/admin" class="btn btn-inverse-primary">Back to applications</a>
+</section>
+{{else}}
+<h4 class="auth-title">{{.Title}}</h4>
+<p class="auth-subtitle">{{.Error}}</p>
+<a href="/admin/signin" class="btn btn-block btn-inverse-primary">Back to sign in</a>
+{{end}}
 {{- end}}

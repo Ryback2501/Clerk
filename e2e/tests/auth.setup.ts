@@ -10,7 +10,7 @@ setup("sign in as an administrator", async ({ page }) => {
   await page.goto("/admin");
   await expect(page).toHaveURL(/\/admin\/signin$/);
 
-  await page.getByRole("button", { name: "google" }).click();
+  await page.getByRole("link", { name: /google/i }).click();
 
   await expect(page).toHaveURL(/\/admin$/);
   await expect(page.getByRole("button", { name: "Sign out" })).toBeVisible();

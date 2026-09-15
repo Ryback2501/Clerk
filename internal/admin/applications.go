@@ -10,7 +10,7 @@ import (
 	"github.com/Ryback2501/Clerk/internal/store"
 )
 
-// pageData is the view model every admin template renders against.
+// pageData is the view model the full pages render against.
 type pageData struct {
 	Title string
 	Admin *adminauth.Admin
@@ -20,32 +20,60 @@ type pageData struct {
 	Error     string
 
 	// Providers is the sign-in page's list of enabled upstreams.
-	Providers []string
+	Providers []providerButton
 
 	// SignedIn drives whether the layout offers a sign-out control.
 	SignedIn bool
 
-	Applications []*store.Application
-	Application  *store.Application
-	Users        []*store.User
-	UserCount    int
-	Form         applicationForm
-
-	// UserError and UserForm carry a rejected "add user" submission back to
-	// the page it came from.
-	UserError string
-	UserForm  string
-
-	// RevealedSecret is set only on the single render that follows generating
-	// a secret. It is never stored and never shown again.
-	RevealedSecret string
+	// Register is the shell's empty registration form.
+	Register registerForm
 }
 
-// applicationForm preserves what the administrator typed, so a validation
-// failure does not make them retype it.
-type applicationForm struct {
-	Name         string
-	RedirectURIs string
+// registerForm is the body of the registration dialog. On a rejected
+// submission it carries back what was typed and why it was refused.
+type registerForm struct {
+	CSRFToken string
+	Name      string
+	Error     string
+}
+
+// listData is the application list: only what a folded application shows.
+type listData struct {
+	Applications []appSummary
+}
+
+type appSummary struct {
+	*store.Application
+	UserCount int
+}
+
+// panelData is everything an unfolded application shows.
+type panelData struct {
+	CSRFToken string
+	App       *store.Application
+	Users     []*store.User
+
+	// RevealedSecret is set only in the response to the request that generated
+	// the secret. It is never stored and no other response carries it.
+	RevealedSecret string
+
+	// URIError/URIForm and UserError/UserForm carry a rejected submission back
+	// into the section it came from.
+	URIError  string
+	URIForm   string
+	UserError string
+	UserForm  string
+}
+
+type alertData struct {
+	Title   string
+	Message string
+}
+
+// showShell renders the interface itself. It deliberately contains no
+// application data: the script loads the list as soon as the page is up.
+func (h *Handler) showShell(w http.ResponseWriter, r *http.Request, admin *adminauth.Admin) {
+	h.render(w, r, "admin", http.StatusOK, h.newPageData(w, r, admin, "Applications"))
 }
 
 func (h *Handler) listApplications(w http.ResponseWriter, r *http.Request, admin *adminauth.Admin) {
@@ -55,41 +83,16 @@ func (h *Handler) listApplications(w http.ResponseWriter, r *http.Request, admin
 		return
 	}
 
-	data := h.newPageData(w, r, admin, "Applications")
-	data.Applications = apps
-	h.render(w, r, "applications", http.StatusOK, data)
-}
-
-func (h *Handler) newApplicationForm(w http.ResponseWriter, r *http.Request, admin *adminauth.Admin) {
-	h.render(w, r, "application_new", http.StatusOK, h.newPageData(w, r, admin, "Register an application"))
-}
-
-func (h *Handler) createApplication(w http.ResponseWriter, r *http.Request, admin *adminauth.Admin) {
-	form := applicationForm{
-		Name:         strings.TrimSpace(r.PostFormValue("name")),
-		RedirectURIs: r.PostFormValue("redirect_uris"),
-	}
-
-	app, plainSecret, err := h.store.CreateApplication(r.Context(), form.Name, splitURIs(form.RedirectURIs))
-	if err != nil {
-		// Only the administrator's own mistakes are theirs to see. Anything
-		// else is an internal fault: it belongs in the log, under a 500.
-		if !errors.Is(err, store.ErrValidation) {
-			h.internalError(w, r, admin, "create application", err)
+	summaries := make([]appSummary, 0, len(apps))
+	for _, app := range apps {
+		n, err := h.store.CountUsers(r.Context(), app.ID)
+		if err != nil {
+			h.internalError(w, r, admin, "count users", err)
 			return
 		}
-		data := h.newPageData(w, r, admin, "Register an application")
-		data.Error = validationMessage(err)
-		data.Form = form
-		h.render(w, r, "application_new", http.StatusUnprocessableEntity, data)
-		return
+		summaries = append(summaries, appSummary{Application: app, UserCount: n})
 	}
-
-	h.logger.InfoContext(r.Context(), "application created",
-		"application_id", app.ID, "client_id", app.ClientID, "admin", admin.Subject)
-
-	h.revealOnce(w, app.ID, plainSecret)
-	http.Redirect(w, r, "/admin/applications/"+strconv.FormatInt(app.ID, 10), http.StatusSeeOther)
+	h.renderFragment(w, r, "list", http.StatusOK, listData{Applications: summaries})
 }
 
 func (h *Handler) showApplication(w http.ResponseWriter, r *http.Request, admin *adminauth.Admin) {
@@ -97,18 +100,33 @@ func (h *Handler) showApplication(w http.ResponseWriter, r *http.Request, admin 
 	if !ok {
 		return
 	}
+	h.renderPanel(w, r, admin, app.ID, http.StatusOK, panelData{})
+}
 
-	users, err := h.store.ListUsers(r.Context(), app.ID)
+func (h *Handler) createApplication(w http.ResponseWriter, r *http.Request, admin *adminauth.Admin) {
+	typed := r.PostFormValue("name")
+
+	app, plainSecret, err := h.store.CreateApplication(r.Context(), strings.TrimSpace(typed), nil)
 	if err != nil {
-		h.internalError(w, r, admin, "list users", err)
+		// Only the administrator's own mistakes are theirs to see. Anything
+		// else is an internal fault: it belongs in the log, under a 500.
+		if !errors.Is(err, store.ErrValidation) {
+			h.internalError(w, r, admin, "create application", err)
+			return
+		}
+		h.renderFragment(w, r, "register-form", http.StatusUnprocessableEntity, registerForm{
+			CSRFToken: h.csrf.Issue(w, r),
+			Name:      typed,
+			Error:     validationMessage(err),
+		})
 		return
 	}
 
-	data := h.newPageData(w, r, admin, app.Name)
-	data.Application = app
-	data.Users = users
-	data.RevealedSecret = h.takeRevealed(w, r, app.ID)
-	h.render(w, r, "application", http.StatusOK, data)
+	h.logger.InfoContext(r.Context(), "application created",
+		"application_id", app.ID, "client_id", app.ClientID, "admin", admin.Subject)
+
+	w.Header().Set(createdHeader, strconv.FormatInt(app.ID, 10))
+	h.renderPanel(w, r, admin, app.ID, http.StatusCreated, panelData{RevealedSecret: plainSecret})
 }
 
 func (h *Handler) regenerateSecret(w http.ResponseWriter, r *http.Request, admin *adminauth.Admin) {
@@ -127,8 +145,7 @@ func (h *Handler) regenerateSecret(w http.ResponseWriter, r *http.Request, admin
 	h.logger.InfoContext(r.Context(), "client secret regenerated",
 		"application_id", app.ID, "client_id", app.ClientID, "admin", admin.Subject)
 
-	h.revealOnce(w, app.ID, plainSecret)
-	http.Redirect(w, r, "/admin/applications/"+strconv.FormatInt(app.ID, 10), http.StatusSeeOther)
+	h.renderPanel(w, r, admin, app.ID, http.StatusOK, panelData{RevealedSecret: plainSecret})
 }
 
 func (h *Handler) addRedirectURI(w http.ResponseWriter, r *http.Request, admin *adminauth.Admin) {
@@ -139,10 +156,10 @@ func (h *Handler) addRedirectURI(w http.ResponseWriter, r *http.Request, admin *
 
 	uri := strings.TrimSpace(r.PostFormValue("uri"))
 	if err := h.store.AddRedirectURI(r.Context(), app.ID, uri); err != nil {
-		h.redisplayApplication(w, r, admin, app.ID, err)
+		h.rejectURI(w, r, admin, app.ID, uri, "add redirect uri", err)
 		return
 	}
-	http.Redirect(w, r, "/admin/applications/"+strconv.FormatInt(app.ID, 10), http.StatusSeeOther)
+	h.renderPanel(w, r, admin, app.ID, http.StatusOK, panelData{})
 }
 
 func (h *Handler) removeRedirectURI(w http.ResponseWriter, r *http.Request, admin *adminauth.Admin) {
@@ -151,32 +168,26 @@ func (h *Handler) removeRedirectURI(w http.ResponseWriter, r *http.Request, admi
 		return
 	}
 
-	uri := r.PostFormValue("uri")
-	if err := h.store.RemoveRedirectURI(r.Context(), app.ID, uri); err != nil {
-		h.redisplayApplication(w, r, admin, app.ID, err)
+	if err := h.store.RemoveRedirectURI(r.Context(), app.ID, r.PostFormValue("uri")); err != nil {
+		h.rejectURI(w, r, admin, app.ID, "", "remove redirect uri", err)
 		return
 	}
-	http.Redirect(w, r, "/admin/applications/"+strconv.FormatInt(app.ID, 10), http.StatusSeeOther)
+	h.renderPanel(w, r, admin, app.ID, http.StatusOK, panelData{})
 }
 
-func (h *Handler) confirmDeleteApplication(w http.ResponseWriter, r *http.Request, admin *adminauth.Admin) {
-	app, ok := h.lookupApplication(w, r, admin)
-	if !ok {
-		return
+// rejectURI answers a failed redirect URI change: the panel with the reason for
+// a validation failure, a 404 for an application deleted meanwhile, and an
+// internal error for anything else.
+func (h *Handler) rejectURI(w http.ResponseWriter, r *http.Request, admin *adminauth.Admin, appID int64, typed, what string, cause error) {
+	switch {
+	case errors.Is(cause, store.ErrValidation):
+		h.renderPanel(w, r, admin, appID, http.StatusUnprocessableEntity,
+			panelData{URIError: validationMessage(cause), URIForm: typed})
+	case errors.Is(cause, store.ErrNotFound):
+		h.notFound(w, r, admin)
+	default:
+		h.internalError(w, r, admin, what, cause)
 	}
-
-	// The count is shown so the administrator sees exactly how much is about to
-	// be destroyed, rather than a generic warning.
-	users, err := h.store.CountUsers(r.Context(), app.ID)
-	if err != nil {
-		h.internalError(w, r, admin, "count users", err)
-		return
-	}
-
-	data := h.newPageData(w, r, admin, "Delete application")
-	data.Application = app
-	data.UserCount = users
-	h.render(w, r, "application_delete", http.StatusOK, data)
 }
 
 func (h *Handler) deleteApplication(w http.ResponseWriter, r *http.Request, admin *adminauth.Admin) {
@@ -192,7 +203,31 @@ func (h *Handler) deleteApplication(w http.ResponseWriter, r *http.Request, admi
 
 	h.logger.InfoContext(r.Context(), "application deleted",
 		"application_id", app.ID, "client_id", app.ClientID, "admin", admin.Subject)
-	http.Redirect(w, r, "/admin", http.StatusSeeOther)
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// renderPanel loads an application's current state and renders its panel,
+// merged with whatever the caller has to add: a secret, or a rejected value.
+func (h *Handler) renderPanel(w http.ResponseWriter, r *http.Request, admin *adminauth.Admin, appID int64, status int, data panelData) {
+	app, err := h.store.GetApplication(r.Context(), appID)
+	if errors.Is(err, store.ErrNotFound) {
+		h.notFound(w, r, admin)
+		return
+	}
+	if err != nil {
+		h.internalError(w, r, admin, "load application", err)
+		return
+	}
+	users, err := h.store.ListUsers(r.Context(), appID)
+	if err != nil {
+		h.internalError(w, r, admin, "list users", err)
+		return
+	}
+
+	data.CSRFToken = h.csrf.Issue(w, r)
+	data.App = app
+	data.Users = users
+	h.renderFragment(w, r, "panel", status, data)
 }
 
 // lookupApplication resolves the {id} path segment, answering 404 for both a
@@ -216,41 +251,9 @@ func (h *Handler) lookupApplication(w http.ResponseWriter, r *http.Request, admi
 	return app, true
 }
 
-// redisplayApplication re-renders the detail page carrying a validation error.
-// A cause that is not a validation failure is an internal fault instead.
-func (h *Handler) redisplayApplication(w http.ResponseWriter, r *http.Request, admin *adminauth.Admin, id int64, cause error) {
-	if !errors.Is(cause, store.ErrValidation) && !errors.Is(cause, store.ErrNotFound) {
-		h.internalError(w, r, admin, "update redirect uris", cause)
-		return
-	}
-
-	app, users, err := h.applicationWithUsers(r, id)
-	if err != nil {
-		h.internalError(w, r, admin, "load application", err)
-		return
-	}
-
-	data := h.newPageData(w, r, admin, app.Name)
-	data.Application = app
-	data.Users = users
-	data.Error = validationMessage(cause)
-	h.render(w, r, "application", http.StatusUnprocessableEntity, data)
-}
-
 // validationMessage strips the sentinel prefix so the administrator reads the
 // problem rather than the plumbing.
 func validationMessage(err error) string {
 	msg := err.Error()
 	return strings.TrimPrefix(msg, store.ErrValidation.Error()+": ")
-}
-
-// splitURIs turns the textarea's one-per-line input into a list.
-func splitURIs(raw string) []string {
-	var out []string
-	for _, line := range strings.Split(raw, "\n") {
-		if trimmed := strings.TrimSpace(line); trimmed != "" {
-			out = append(out, trimmed)
-		}
-	}
-	return out
 }

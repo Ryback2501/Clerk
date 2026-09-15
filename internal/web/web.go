@@ -1,7 +1,7 @@
 // Package web holds the static assets shared by the two interfaces Clerk
 // serves: the administration UI and the end-user login page.
 //
-// They live here rather than in either package so the stylesheet is embedded
+// They live here rather than in either package so the assets are embedded
 // once, and so the login page does not have to reach into the admin package
 // for it — internal/oidc must not depend on internal/admin.
 package web

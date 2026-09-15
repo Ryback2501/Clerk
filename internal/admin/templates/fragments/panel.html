@@ -1,0 +1,154 @@
+{{define "panel" -}}
+<div class="panel" data-user-count="{{len .Users}}">
+
+  <section class="panel-section">
+    <h5 class="section-title">Credentials</h5>
+    {{if .RevealedSecret}}
+    <div class="alert alert-success secret-alert" role="status">
+      <p class="alert-heading">Client secret</p>
+      <p><code class="value secret">{{.RevealedSecret}}</code></p>
+      <p class="small">
+        <strong>Copy it now.</strong> Only a hash is stored, so this secret cannot be shown
+        again. If you lose it, regenerate a new one — you do not need to recreate the application.
+      </p>
+    </div>
+    {{end}}
+    <dl class="credentials">
+      <dt>Client ID</dt>
+      <dd><code class="value">{{.App.ClientID}}</code></dd>
+      <dt>Client secret</dt>
+      <dd class="text-muted">Stored as a hash and never displayed again.</dd>
+      <dt>Registered</dt>
+      <dd class="text-muted">{{.App.CreatedAt}}</dd>
+    </dl>
+    <form method="post" action="/admin/applications/{{.App.ID}}/secret" class="action-row">
+      <input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
+      <button type="submit" class="btn btn-sm btn-inverse-primary">Regenerate client secret</button>
+      <small class="form-text">The current secret stops working immediately.</small>
+    </form>
+  </section>
+
+  <section class="panel-section">
+    <h5 class="section-title">Redirect URIs</h5>
+    {{if .App.RedirectURIs}}
+    <div class="table-responsive">
+      <table class="table table-hover">
+        <thead><tr><th scope="col">URI</th><th scope="col" class="col-action"><span class="sr-only">Actions</span></th></tr></thead>
+        <tbody>
+        {{range .App.RedirectURIs}}
+          <tr>
+            <td><code class="value">{{.}}</code></td>
+            <td class="col-action">
+              <form method="post" action="/admin/applications/{{$.App.ID}}/redirect-uris/remove">
+                <input type="hidden" name="csrf_token" value="{{$.CSRFToken}}">
+                <input type="hidden" name="uri" value="{{.}}">
+                <button type="submit" class="btn btn-sm btn-inverse-danger">Remove</button>
+              </form>
+            </td>
+          </tr>
+        {{end}}
+        </tbody>
+      </table>
+    </div>
+    {{else}}
+    <p class="alert alert-warning">No redirect URIs registered. Authorization requests will be rejected until you add one.</p>
+    {{end}}
+    <form method="post" action="/admin/applications/{{.App.ID}}/redirect-uris" class="add-form">
+      <input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
+      {{if .URIError}}<p class="alert alert-danger" role="alert">{{.URIError}}</p>{{end}}
+      <div class="form-group">
+        <label for="uri-{{.App.ID}}">Add a redirect URI</label>
+        <div class="input-row">
+          <input id="uri-{{.App.ID}}" class="form-control{{if .URIError}} is-invalid{{end}}" type="text" inputmode="url"
+                 name="uri" value="{{.URIForm}}" required autocomplete="off" placeholder="https://app.example.com/callback">
+          <button type="submit" class="btn btn-inverse-primary">Add redirect URI</button>
+        </div>
+        <small class="form-text">Matched exactly at authorization time — no wildcards, no prefixes.</small>
+      </div>
+    </form>
+  </section>
+
+  <section class="panel-section">
+    <h5 class="section-title">Test users</h5>
+    <p class="text-muted small">
+      The identities the login page offers for this application. There are no passwords:
+      signing in means picking one and pressing Login.
+    </p>
+    {{if .Users}}
+    <div class="table-responsive">
+      <table class="table table-hover">
+        <thead>
+          <tr>
+            <th scope="col">Name</th>
+            <th scope="col">Subject (<code>sub</code>)</th>
+            <th scope="col" class="col-action"><span class="sr-only">Actions</span></th>
+          </tr>
+        </thead>
+        <tbody>
+        {{range .Users}}
+          <tr>
+            <td>{{.Username}}</td>
+            <td><code class="value">{{.Sub}}</code></td>
+            <td class="col-action">
+              <form method="post" action="/admin/applications/{{$.App.ID}}/users/{{.ID}}/delete">
+                <input type="hidden" name="csrf_token" value="{{$.CSRFToken}}">
+                <button type="submit" class="btn btn-sm btn-inverse-danger">Delete</button>
+              </form>
+            </td>
+          </tr>
+        {{end}}
+        </tbody>
+      </table>
+    </div>
+    {{else}}
+    <p class="alert alert-warning">No test users yet. Authorization requests for this application will show an error until you add at least one.</p>
+    {{end}}
+    <form method="post" action="/admin/applications/{{.App.ID}}/users" class="add-form">
+      <input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
+      {{if .UserError}}<p class="alert alert-danger" role="alert">{{.UserError}}</p>{{end}}
+      <div class="form-group">
+        <label for="user-{{.App.ID}}">Add a test user</label>
+        <div class="input-row">
+          <input id="user-{{.App.ID}}" class="form-control{{if .UserError}} is-invalid{{end}}" type="text"
+                 name="username" value="{{.UserForm}}" required autocomplete="off" placeholder="david">
+          <button type="submit" class="btn btn-inverse-primary">Add user</button>
+        </div>
+        <small class="form-text">Unique within this application. The same name in another application is a different identity.</small>
+      </div>
+    </form>
+  </section>
+
+  <section class="panel-section danger-zone">
+    <h5 class="section-title">Danger zone</h5>
+    <div class="danger-row">
+      <div>
+        <p class="danger-heading">Delete this application</p>
+        <p class="text-muted small">Its client ID stops working and all of its test users are deleted.</p>
+      </div>
+      <button type="button" class="btn btn-inverse-danger" commandfor="delete-{{.App.ID}}" command="show-modal">Delete application</button>
+    </div>
+  </section>
+
+  <dialog id="delete-{{.App.ID}}" class="modal" aria-labelledby="delete-title-{{.App.ID}}">
+    <form method="post" action="/admin/applications/{{.App.ID}}/delete" class="modal-form" data-delete>
+      <input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
+      <header class="modal-header">
+        <h4 id="delete-title-{{.App.ID}}" class="modal-title">Delete application?</h4>
+      </header>
+      <div class="modal-body">
+        <p>
+          This will permanently delete the application <strong>{{.App.Name}}</strong>
+          and all <strong>{{len .Users}}</strong> of its test users.
+        </p>
+        <p>Any application configured with this client ID will stop being able to sign users in.</p>
+        <p><strong>This action cannot be undone.</strong></p>
+      </div>
+      <footer class="modal-footer">
+        <button type="button" class="btn btn-inverse-secondary" commandfor="delete-{{.App.ID}}" command="close">Cancel</button>
+        <button type="submit" class="btn btn-inverse-danger">Delete application</button>
+      </footer>
+    </form>
+  </dialog>
+
+</div>
+{{- end}}
