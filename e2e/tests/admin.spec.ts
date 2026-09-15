@@ -195,6 +195,38 @@ test.describe("administration", () => {
     expect(afterReload).toHaveLength(1);
   });
 
+  test("a long page scrolls, and nothing ends up hidden under the fixed top bar", async ({ page }) => {
+    await page.setViewportSize({ width: 1280, height: 480 });
+    const app = await registerApplication(page, uniqueName("Scrolling"), "https://scroll.example.com/cb");
+    await page.reload();
+    await openApplication(page, app.id);
+
+    const scroll = () => page.evaluate(() => ({
+      y: window.scrollY,
+      max: document.scrollingElement!.scrollHeight - window.innerHeight,
+    }));
+    expect((await scroll()).max).toBeGreaterThan(0);
+
+    await page.mouse.move(640, 300);
+    await page.mouse.wheel(0, 400);
+    await expect.poll(async () => (await scroll()).y).toBeGreaterThan(0);
+
+    // The last control on the page can be reached, and the bar stays put.
+    const register = page.getByRole("button", { name: "Register application" });
+    await register.scrollIntoViewIfNeeded();
+    await expect(register).toBeInViewport();
+    await expect(page.locator(".topbar")).toBeInViewport();
+
+    // Bringing an application into view — as the page does after creating one —
+    // stops below the bar, not underneath it.
+    await page.keyboard.press("End");
+    const summary = applicationCard(page, app.id).locator("summary");
+    await summary.evaluate((el) => el.scrollIntoView({ block: "start" }));
+    const bar = (await page.locator(".topbar").boundingBox())!;
+    const box = (await summary.boundingBox())!;
+    expect(box.y).toBeGreaterThanOrEqual(bar.y + bar.height);
+  });
+
   test("the list is disabled while it loads", async ({ page }) => {
     await registerApplication(page, uniqueName("Slow List"), "https://slow.example.com/cb");
 
