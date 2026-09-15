@@ -1,0 +1,20 @@
+{
+  "interactiveLogin": false,
+  "tokenCallbacks": [
+    {
+      "issuerId": "google",
+      "requestMappings": [
+        {
+          "requestParam": "code",
+          "match": "*",
+          "claims": {
+            "sub": "e2e-admin",
+            "name": "E2E Admin",
+            "email": "e2e-admin@example.com",
+            "aud": ["${clientId}"]
+          }
+        }
+      ]
+    }
+  ]
+}

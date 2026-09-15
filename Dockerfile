@@ -27,8 +27,8 @@ COPY --from=build /out/clerk /clerk
 # Owned by the nonroot user (uid 65532) the container runs as. Without this the
 # directories land root-owned and the process cannot create its database or
 # persist a signing key. Docker propagates this ownership into a fresh named
-# volume; a bind mount takes its ownership from the host instead, so compose
-# must mount host directories the same uid can write.
+# volume; a bind mount takes its ownership from the host instead, so a host
+# directory mounted there must be writable by the same uid.
 COPY --from=build --chown=65532:65532 /out/data /data
 COPY --from=build --chown=65532:65532 /out/keys /keys
 
@@ -37,5 +37,10 @@ VOLUME ["/data", "/keys"]
 
 EXPOSE 8080
 USER nonroot:nonroot
+
+# Exec form: the runtime image has no shell, so a shell-form check could never
+# run. The binary checks its own /health endpoint.
+HEALTHCHECK --interval=10s --timeout=3s --start-period=5s --retries=5 \
+  CMD ["/clerk", "-healthcheck"]
 
 ENTRYPOINT ["/clerk"]
