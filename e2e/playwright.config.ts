@@ -8,10 +8,9 @@ import path from "node:path";
 export const adminState = path.join(__dirname, ".auth", "admin.json");
 
 // Clerk is expected to be already running, with its mock sign-in provider and
-// role service. CI starts the stack before invoking these tests; locally,
-// `docker compose -f e2e/compose.yml up -d --build --wait` from the repository
-// root does the same.
-const baseURL = process.env.CLERK_BASE_URL ?? "http://localhost:8080";
+// role service. CI starts them with `e2e/stack.sh up` before invoking these
+// tests, and the same command works locally.
+const baseURL = process.env.BASE_URL ?? "http://localhost:8080";
 
 export default defineConfig({
   testDir: "./tests",

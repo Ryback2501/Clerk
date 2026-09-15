@@ -52,14 +52,14 @@ type OAuthCredentials struct {
 	ClientSecret string
 
 	// Issuer overrides the provider's default OIDC issuer, read from
-	// CLERK_<PROVIDER>_ISSUER. Microsoft single-tenant applications need this:
+	// <PROVIDER>_ISSUER. Microsoft single-tenant applications need this:
 	// the default is the multi-tenant endpoint, and a single-tenant app's
 	// tokens are issued by its own tenant.
 	Issuer string
 }
 
 // adminProviderNames are the upstreams that can be configured. Each reads
-// CLERK_<NAME>_CLIENT_ID and CLERK_<NAME>_CLIENT_SECRET.
+// <PROVIDER>_CLIENT_ID and <PROVIDER>_CLIENT_SECRET, e.g. GOOGLE_CLIENT_ID.
 var adminProviderNames = []string{"google", "github", "microsoft", "linkedin"}
 
 // Getenv reads an environment variable. Taking it as a parameter keeps Load
@@ -73,12 +73,12 @@ func Load(getenv Getenv) (*Config, error) {
 	var problems []error
 
 	cfg := &Config{
-		ListenAddr: withDefault(getenv("CLERK_LISTEN_ADDR"), DefaultListenAddr),
-		DBPath:     withDefault(getenv("CLERK_DB_PATH"), DefaultDBPath),
-		KeysPath:   withDefault(getenv("CLERK_KEYS_PATH"), DefaultKeysPath),
+		ListenAddr: withDefault(getenv("LISTEN_ADDR"), DefaultListenAddr),
+		DBPath:     withDefault(getenv("DB_PATH"), DefaultDBPath),
+		KeysPath:   withDefault(getenv("KEYS_PATH"), DefaultKeysPath),
 	}
 
-	issuer, err := parseIssuer(getenv("CLERK_ISSUER"))
+	issuer, err := parseIssuer(getenv("ISSUER"))
 	if err != nil {
 		problems = append(problems, err)
 	}
@@ -89,9 +89,9 @@ func Load(getenv Getenv) (*Config, error) {
 		target *time.Duration
 		def    time.Duration
 	}{
-		{"CLERK_CODE_TTL", &cfg.CodeTTL, DefaultCodeTTL},
-		{"CLERK_ACCESS_TOKEN_TTL", &cfg.AccessTokenTTL, DefaultAccessTokenTTL},
-		{"CLERK_ID_TOKEN_TTL", &cfg.IDTokenTTL, DefaultIDTokenTTL},
+		{"CODE_TTL", &cfg.CodeTTL, DefaultCodeTTL},
+		{"ACCESS_TOKEN_TTL", &cfg.AccessTokenTTL, DefaultAccessTokenTTL},
+		{"ID_TOKEN_TTL", &cfg.IDTokenTTL, DefaultIDTokenTTL},
 	} {
 		v, err := parseDuration(d.key, getenv(d.key), d.def)
 		if err != nil {
@@ -101,9 +101,9 @@ func Load(getenv Getenv) (*Config, error) {
 		*d.target = v
 	}
 
-	cfg.BouncerURL = strings.TrimSpace(getenv("CLERK_BOUNCER_URL"))
-	cfg.BouncerAPIKey = strings.TrimSpace(getenv("CLERK_BOUNCER_API_KEY"))
-	cfg.BouncerRequiredRole = withDefault(getenv("CLERK_BOUNCER_REQUIRED_ROLE"), "admin")
+	cfg.BouncerURL = strings.TrimSpace(getenv("BOUNCER_URL"))
+	cfg.BouncerAPIKey = strings.TrimSpace(getenv("BOUNCER_API_KEY"))
+	cfg.BouncerRequiredRole = withDefault(getenv("BOUNCER_REQUIRED_ROLE"), "admin")
 
 	providers, providerProblems := loadAdminProviders(getenv)
 	cfg.AdminProviders = providers
@@ -125,7 +125,7 @@ func loadAdminProviders(getenv Getenv) (map[string]OAuthCredentials, []error) {
 	var problems []error
 
 	for _, name := range adminProviderNames {
-		prefix := "CLERK_" + strings.ToUpper(name)
+		prefix := strings.ToUpper(name)
 		id := strings.TrimSpace(getenv(prefix + "_CLIENT_ID"))
 		secret := strings.TrimSpace(getenv(prefix + "_CLIENT_SECRET"))
 
@@ -157,14 +157,14 @@ func validateAdminSetup(cfg *Config) []error {
 	switch {
 	case !hasProviders && !hasBouncer:
 		problems = append(problems, errors.New(
-			"administration has no sign-in configured: set at least one CLERK_<PROVIDER>_CLIENT_ID/SECRET pair "+
-				"together with CLERK_BOUNCER_URL and CLERK_BOUNCER_API_KEY"))
+			"administration has no sign-in configured: set at least one <PROVIDER>_CLIENT_ID/SECRET pair "+
+				"together with BOUNCER_URL and BOUNCER_API_KEY"))
 	case !hasProviders:
 		problems = append(problems, errors.New(
 			"a role service is configured but no sign-in provider is: nobody could sign in"))
 	case !hasBouncer:
 		problems = append(problems, errors.New(
-			"sign-in providers are configured but CLERK_BOUNCER_URL and CLERK_BOUNCER_API_KEY are not: "+
+			"sign-in providers are configured but BOUNCER_URL and BOUNCER_API_KEY are not: "+
 				"administrators could authenticate but nothing would authorize them"))
 	}
 	return problems
@@ -176,22 +176,22 @@ func validateAdminSetup(cfg *Config) []error {
 // double slash, which some strict clients reject.
 func parseIssuer(raw string) (*url.URL, error) {
 	if strings.TrimSpace(raw) == "" {
-		return nil, errors.New("CLERK_ISSUER is required (e.g. http://localhost:8080)")
+		return nil, errors.New("ISSUER is required (e.g. http://localhost:8080)")
 	}
 
 	u, err := url.Parse(raw)
 	if err != nil {
-		return nil, fmt.Errorf("CLERK_ISSUER is not a valid URL: %w", err)
+		return nil, fmt.Errorf("ISSUER is not a valid URL: %w", err)
 	}
 	switch {
 	case u.Scheme != "http" && u.Scheme != "https":
-		return nil, fmt.Errorf("CLERK_ISSUER must use http or https, got %q", u.Scheme)
+		return nil, fmt.Errorf("ISSUER must use http or https, got %q", u.Scheme)
 	case u.Host == "":
-		return nil, fmt.Errorf("CLERK_ISSUER must include a host, got %q", raw)
+		return nil, fmt.Errorf("ISSUER must include a host, got %q", raw)
 	case u.RawQuery != "":
-		return nil, fmt.Errorf("CLERK_ISSUER must not contain a query string, got %q", raw)
+		return nil, fmt.Errorf("ISSUER must not contain a query string, got %q", raw)
 	case u.Fragment != "":
-		return nil, fmt.Errorf("CLERK_ISSUER must not contain a fragment, got %q", raw)
+		return nil, fmt.Errorf("ISSUER must not contain a fragment, got %q", raw)
 	}
 
 	// Strip every trailing slash, not just one: "https://host//" would otherwise

@@ -14,17 +14,17 @@ func envMap(m map[string]string) Getenv {
 // runnable adds the minimum administration setup a configuration needs to be
 // accepted, so a test about something else does not have to restate it.
 func runnable(m map[string]string) Getenv {
-	if m["CLERK_GOOGLE_CLIENT_ID"] == "" && m["CLERK_BOUNCER_URL"] == "" {
-		m["CLERK_BOUNCER_URL"] = "http://bouncer.internal"
-		m["CLERK_BOUNCER_API_KEY"] = "bncr_test"
-		m["CLERK_GOOGLE_CLIENT_ID"] = "google-id"
-		m["CLERK_GOOGLE_CLIENT_SECRET"] = "google-secret"
+	if m["GOOGLE_CLIENT_ID"] == "" && m["BOUNCER_URL"] == "" {
+		m["BOUNCER_URL"] = "http://bouncer.internal"
+		m["BOUNCER_API_KEY"] = "bncr_test"
+		m["GOOGLE_CLIENT_ID"] = "google-id"
+		m["GOOGLE_CLIENT_SECRET"] = "google-secret"
 	}
 	return envMap(m)
 }
 
 func TestLoadAppliesDefaults(t *testing.T) {
-	cfg, err := Load(runnable(map[string]string{"CLERK_ISSUER": "http://localhost:8080"}))
+	cfg, err := Load(runnable(map[string]string{"ISSUER": "http://localhost:8080"}))
 	if err != nil {
 		t.Fatalf("Load() returned error: %v", err)
 	}
@@ -45,13 +45,13 @@ func TestLoadAppliesDefaults(t *testing.T) {
 
 func TestLoadOverridesDefaults(t *testing.T) {
 	cfg, err := Load(runnable(map[string]string{
-		"CLERK_ISSUER":           "https://idp.example.com",
-		"CLERK_LISTEN_ADDR":      ":9999",
-		"CLERK_DB_PATH":          "/tmp/clerk.db",
-		"CLERK_KEYS_PATH":        "/tmp/signing.pem",
-		"CLERK_CODE_TTL":         "30s",
-		"CLERK_ACCESS_TOKEN_TTL": "15m",
-		"CLERK_ID_TOKEN_TTL":     "2h",
+		"ISSUER":           "https://idp.example.com",
+		"LISTEN_ADDR":      ":9999",
+		"DB_PATH":          "/tmp/clerk.db",
+		"KEYS_PATH":        "/tmp/signing.pem",
+		"CODE_TTL":         "30s",
+		"ACCESS_TOKEN_TTL": "15m",
+		"ID_TOKEN_TTL":     "2h",
 	}))
 	if err != nil {
 		t.Fatalf("Load() returned error: %v", err)
@@ -74,7 +74,7 @@ func TestLoadOverridesDefaults(t *testing.T) {
 // A trailing slash on the issuer would otherwise produce "//authorize" in the
 // discovery document, which strict OIDC clients reject.
 func TestLoadStripsIssuerTrailingSlash(t *testing.T) {
-	cfg, err := Load(runnable(map[string]string{"CLERK_ISSUER": "https://idp.example.com/oidc/"}))
+	cfg, err := Load(runnable(map[string]string{"ISSUER": "https://idp.example.com/oidc/"}))
 	if err != nil {
 		t.Fatalf("Load() returned error: %v", err)
 	}
@@ -92,41 +92,41 @@ func TestLoadRejectsBadInput(t *testing.T) {
 		{
 			name:    "missing issuer",
 			env:     map[string]string{},
-			wantSub: "CLERK_ISSUER is required",
+			wantSub: "ISSUER is required",
 		},
 		{
 			name:    "issuer with unsupported scheme",
-			env:     map[string]string{"CLERK_ISSUER": "ftp://idp.example.com"},
+			env:     map[string]string{"ISSUER": "ftp://idp.example.com"},
 			wantSub: "must use http or https",
 		},
 		{
 			name:    "issuer without host",
-			env:     map[string]string{"CLERK_ISSUER": "https://"},
+			env:     map[string]string{"ISSUER": "https://"},
 			wantSub: "must include a host",
 		},
 		{
 			name:    "issuer with query string",
-			env:     map[string]string{"CLERK_ISSUER": "https://idp.example.com?a=b"},
+			env:     map[string]string{"ISSUER": "https://idp.example.com?a=b"},
 			wantSub: "must not contain a query string",
 		},
 		{
 			name:    "issuer with fragment",
-			env:     map[string]string{"CLERK_ISSUER": "https://idp.example.com#frag"},
+			env:     map[string]string{"ISSUER": "https://idp.example.com#frag"},
 			wantSub: "must not contain a fragment",
 		},
 		{
 			name: "unparseable duration",
 			env: map[string]string{
-				"CLERK_ISSUER":   "http://localhost:8080",
-				"CLERK_CODE_TTL": "sixty",
+				"ISSUER":   "http://localhost:8080",
+				"CODE_TTL": "sixty",
 			},
 			wantSub: "not a valid duration",
 		},
 		{
 			name: "non-positive duration",
 			env: map[string]string{
-				"CLERK_ISSUER":   "http://localhost:8080",
-				"CLERK_CODE_TTL": "-5s",
+				"ISSUER":   "http://localhost:8080",
+				"CODE_TTL": "-5s",
 			},
 			wantSub: "must be at least 1s",
 		},
@@ -149,13 +149,13 @@ func TestLoadRejectsBadInput(t *testing.T) {
 // restart to fix a broken deployment, not one per mistake.
 func TestLoadReportsAllProblemsAtOnce(t *testing.T) {
 	_, err := Load(envMap(map[string]string{
-		"CLERK_CODE_TTL":     "nope",
-		"CLERK_ID_TOKEN_TTL": "-1s",
+		"CODE_TTL":     "nope",
+		"ID_TOKEN_TTL": "-1s",
 	}))
 	if err == nil {
 		t.Fatal("Load() succeeded, want error")
 	}
-	for _, want := range []string{"CLERK_ISSUER is required", "CLERK_CODE_TTL", "CLERK_ID_TOKEN_TTL"} {
+	for _, want := range []string{"ISSUER is required", "CODE_TTL", "ID_TOKEN_TTL"} {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("error %q missing mention of %q", err, want)
 		}
@@ -163,19 +163,19 @@ func TestLoadReportsAllProblemsAtOnce(t *testing.T) {
 }
 
 func TestTokenLifetimesMustBeAtLeastOneSecond(t *testing.T) {
-	for _, key := range []string{"CLERK_CODE_TTL", "CLERK_ACCESS_TOKEN_TTL", "CLERK_ID_TOKEN_TTL"} {
+	for _, key := range []string{"CODE_TTL", "ACCESS_TOKEN_TTL", "ID_TOKEN_TTL"} {
 		t.Run(key, func(t *testing.T) {
 			_, err := Load(runnable(map[string]string{
-				"CLERK_ISSUER": "http://localhost:8080",
-				key:            "500ms",
+				"ISSUER": "http://localhost:8080",
+				key:      "500ms",
 			}))
 			if err == nil {
 				t.Errorf("%s=500ms was accepted; it truncates to expires_in=0", key)
 			}
 
 			if _, err := Load(runnable(map[string]string{
-				"CLERK_ISSUER": "http://localhost:8080",
-				key:            "1s",
+				"ISSUER": "http://localhost:8080",
+				key:      "1s",
 			})); err != nil {
 				t.Errorf("%s=1s was rejected: %v", key, err)
 			}
@@ -185,13 +185,13 @@ func TestTokenLifetimesMustBeAtLeastOneSecond(t *testing.T) {
 
 func TestAdminOAuthConfiguration(t *testing.T) {
 	base := map[string]string{
-		"CLERK_ISSUER":               "https://clerk.example.com",
-		"CLERK_BOUNCER_URL":          "http://bouncer.internal",
-		"CLERK_BOUNCER_API_KEY":      "bncr_secret",
-		"CLERK_GOOGLE_CLIENT_ID":     "google-id",
-		"CLERK_GOOGLE_CLIENT_SECRET": "google-secret",
-		"CLERK_GITHUB_CLIENT_ID":     "github-id",
-		"CLERK_GITHUB_CLIENT_SECRET": "github-secret",
+		"ISSUER":               "https://clerk.example.com",
+		"BOUNCER_URL":          "http://bouncer.internal",
+		"BOUNCER_API_KEY":      "bncr_secret",
+		"GOOGLE_CLIENT_ID":     "google-id",
+		"GOOGLE_CLIENT_SECRET": "google-secret",
+		"GITHUB_CLIENT_ID":     "github-id",
+		"GITHUB_CLIENT_SECRET": "github-secret",
 	}
 
 	cfg, err := Load(envMap(base))
@@ -218,10 +218,10 @@ func TestAdminOAuthConfiguration(t *testing.T) {
 // otherwise show up as that provider silently missing from the sign-in page.
 func TestHalfConfiguredProviderIsRejected(t *testing.T) {
 	_, err := Load(envMap(map[string]string{
-		"CLERK_ISSUER":           "https://clerk.example.com",
-		"CLERK_BOUNCER_URL":      "http://bouncer.internal",
-		"CLERK_BOUNCER_API_KEY":  "bncr_secret",
-		"CLERK_GOOGLE_CLIENT_ID": "google-id",
+		"ISSUER":           "https://clerk.example.com",
+		"BOUNCER_URL":      "http://bouncer.internal",
+		"BOUNCER_API_KEY":  "bncr_secret",
+		"GOOGLE_CLIENT_ID": "google-id",
 	}))
 	if err == nil {
 		t.Fatal("a provider with a client id but no secret was accepted")
@@ -234,7 +234,7 @@ func TestHalfConfiguredProviderIsRejected(t *testing.T) {
 // Real administration configuration is always required: there is no way to
 // run the admin interface unauthenticated.
 func TestAdminConfigurationIsRequired(t *testing.T) {
-	_, err := Load(envMap(map[string]string{"CLERK_ISSUER": "https://clerk.example.com"}))
+	_, err := Load(envMap(map[string]string{"ISSUER": "https://clerk.example.com"}))
 	if err == nil {
 		t.Fatal("a configuration without admin sign-in was accepted")
 	}
@@ -244,9 +244,9 @@ func TestAdminConfigurationIsRequired(t *testing.T) {
 // then have nothing to authorize them against.
 func TestProvidersWithoutBouncerAreRejected(t *testing.T) {
 	_, err := Load(envMap(map[string]string{
-		"CLERK_ISSUER":               "https://clerk.example.com",
-		"CLERK_GOOGLE_CLIENT_ID":     "id",
-		"CLERK_GOOGLE_CLIENT_SECRET": "secret",
+		"ISSUER":               "https://clerk.example.com",
+		"GOOGLE_CLIENT_ID":     "id",
+		"GOOGLE_CLIENT_SECRET": "secret",
 	}))
 	if err == nil {
 		t.Fatal("OAuth providers were accepted with no role service configured")

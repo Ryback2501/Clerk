@@ -35,7 +35,7 @@ func main() {
 	// The container healthcheck runs this same binary, because the runtime
 	// image is distroless and has neither a shell nor curl.
 	if healthcheckRequested(os.Args[1:]) {
-		if err := runHealthcheck(os.Getenv("CLERK_LISTEN_ADDR")); err != nil {
+		if err := runHealthcheck(os.Getenv("LISTEN_ADDR")); err != nil {
 			exitUnhealthy(err)
 		}
 		return

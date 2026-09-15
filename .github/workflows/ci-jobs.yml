@@ -83,7 +83,7 @@ jobs:
       - name: Start the stack
         # Clerk built from this checkout, with administrators signed in through
         # a mock OIDC provider and authorized by a Bouncer stub.
-        run: docker compose -f e2e/compose.yml up -d --build --wait
+        run: e2e/stack.sh up
       - name: Install the suite
         working-directory: e2e
         run: npm ci
@@ -95,7 +95,7 @@ jobs:
         run: npx playwright test
       - name: Stack logs
         if: failure()
-        run: docker compose -f e2e/compose.yml logs
+        run: e2e/stack.sh logs
       - uses: actions/upload-artifact@v7
         if: failure()
         with:
@@ -104,7 +104,7 @@ jobs:
           retention-days: 7
       - name: Stop the stack
         if: always()
-        run: docker compose -f e2e/compose.yml down -v || true
+        run: e2e/stack.sh down
 
   build:
     name: build
@@ -133,7 +133,7 @@ jobs:
         # Clerk refuses to start without an issuer and admin sign-in, and it
         # discovers the sign-in provider at startup, so it runs in the e2e
         # stack, whose mock provider and Bouncer stub need no network access.
-        run: docker compose -f e2e/compose.yml up -d --build
+        run: e2e/stack.sh up
       - name: Healthcheck
         run: |
           for i in $(seq 1 15); do
@@ -142,10 +142,10 @@ jobs:
             fi
             sleep 2
           done
-          echo "container did not become healthy"; docker compose -f e2e/compose.yml logs; exit 1
+          echo "container did not become healthy"; e2e/stack.sh logs; exit 1
       - name: Stop container
         if: always()
-        run: docker compose -f e2e/compose.yml down -v || true
+        run: e2e/stack.sh down
 
   # Secret + dependency scan, toggled by the SECURITY_SCAN repo variable so it can
   # be flipped without editing this file. Deterministic tooling — no LLM in the loop.
