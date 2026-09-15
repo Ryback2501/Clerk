@@ -27,3 +27,5 @@ coverage.out
 /e2e/node_modules/
 /e2e/test-results/
 /e2e/playwright-report/
+# Signed-in browser state saved by the setup project
+/e2e/.auth/

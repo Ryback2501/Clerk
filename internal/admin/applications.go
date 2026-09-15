@@ -12,9 +12,8 @@ import (
 
 // pageData is the view model every admin template renders against.
 type pageData struct {
-	Title    string
-	Admin    *adminauth.Admin
-	Insecure bool
+	Title string
+	Admin *adminauth.Admin
 
 	CSRFToken string
 	CSRFField string

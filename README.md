@@ -6,15 +6,31 @@ An Identity Provider (IdP) for testing and development environments to generate 
 ```bash
 docker run -d --name clerk \
   -e CLERK_ISSUER=http://localhost:8080 \
-  -e CLERK_ADMIN_INSECURE=true \
+  -e CLERK_BOUNCER_URL=http://bouncer:3000 \
+  -e CLERK_BOUNCER_API_KEY=bncr_... \
+  -e CLERK_GOOGLE_CLIENT_ID=... \
+  -e CLERK_GOOGLE_CLIENT_SECRET=... \
   -v clerk-data:/data \
   -v clerk-keys:/keys \
   -p 8080:8080 \
   ryback2501/clerk:latest
 ```
 
-Then open <http://localhost:8080/admin> to register an application, and point your
-OIDC client at `http://localhost:8080/.well-known/openid-configuration`.
+Administration always requires signing in — see [Administration access](#administration-access)
+for what those variables need. Then open <http://localhost:8080/admin> to register an
+application, and point your OIDC client at
+`http://localhost:8080/.well-known/openid-configuration`.
+
+To try Clerk without any of that, `e2e/compose.yml` runs it from source with a mock
+sign-in provider and a Bouncer stub that make you an administrator:
+
+```bash
+docker compose -f e2e/compose.yml up -d --build --wait
+```
+
+That stack uses host networking, so the browser and Clerk see the mock provider at the
+same address. It works as-is on Linux; Docker Desktop on macOS or Windows needs host
+networking enabled in its settings.
 
 ### Configuration
 
@@ -27,14 +43,12 @@ OIDC client at `http://localhost:8080/.well-known/openid-configuration`.
 | `CLERK_CODE_TTL` | `1m` | Authorization code lifetime. |
 | `CLERK_ACCESS_TOKEN_TTL` | `1h` | Access token lifetime. |
 | `CLERK_ID_TOKEN_TTL` | `1h` | ID token lifetime. |
-| `CLERK_ADMIN_INSECURE` | `false` | Run with administration **completely unauthenticated**. Only for local work; never expose the port. |
 
 ### Administration access
 
 Administrators sign in with an external OAuth provider, and whether they may
 administer this provider is then decided by [Bouncer](https://github.com/Ryback2501/Bouncer).
-Clerk refuses to start unless either this is configured or `CLERK_ADMIN_INSECURE=true`
-is set — otherwise an image would quietly serve an open admin interface.
+Clerk refuses to start unless this is configured: there is no unauthenticated mode.
 
 | Variable | Meaning |
 |---|---|

@@ -49,8 +49,8 @@ export async function addUser(page: Page, applicationId: string, username: strin
 /**
  * The validation error shown on a page.
  *
- * Scoped to <main>: the "administration is unauthenticated" banner in the
- * header is also role="alert", so an unscoped lookup matches two elements.
+ * Scoped to <main>, so an alert anywhere else in the layout can never be
+ * mistaken for the form's own error.
  */
 export function pageAlert(page: Page) {
   return page.locator('main [role="alert"]');

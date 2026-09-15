@@ -41,31 +41,9 @@ type Admin struct {
 
 // Authenticator decides whether a request may use the admin interface.
 //
-// Implementations return an Admin, or one of the sentinel errors above. The
-// real implementation signs the user in with an external OAuth provider and
-// checks their role against the external role service; AllowAll stands in
-// until then.
+// Implementations return an Admin, or one of the sentinel errors above. OAuth
+// signs the user in with an external provider and checks their role against
+// the external role service.
 type Authenticator interface {
 	Authenticate(r *http.Request) (*Admin, error)
 }
-
-// AllowAll authorises every request as a fixed local administrator.
-//
-// It is a development stand-in only: it performs no authentication whatsoever,
-// so anything it protects is open to anyone who can reach the port. Callers are
-// expected to announce it loudly at startup.
-type AllowAll struct{}
-
-// Authenticate implements Authenticator by authorising everyone.
-func (AllowAll) Authenticate(*http.Request) (*Admin, error) {
-	return &Admin{
-		Subject:  "local-development",
-		Provider: "none",
-		Name:     "Local administrator",
-	}, nil
-}
-
-// Warning is the message a caller should log when wiring AllowAll, so an
-// unprotected admin interface is never a silent condition.
-const Warning = "ADMIN AUTHENTICATION IS DISABLED: every request is authorised as a local administrator. " +
-	"This build must not be exposed to an untrusted network."

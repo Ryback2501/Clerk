@@ -80,21 +80,10 @@ jobs:
           node-version: 22
           cache: npm
           cache-dependency-path: e2e/package-lock.json
-      - name: Build the image
-        run: docker build -t clerk:e2e .
-      - name: Start Clerk
-        # Administration is deliberately open here: these tests exercise the
-        # provider, not the sign-in integration, which has its own unit tests.
-        run: |
-          docker run -d --name clerk-e2e \
-            -e CLERK_ISSUER=http://localhost:8080 \
-            -e CLERK_ADMIN_INSECURE=true \
-            -p 8080:8080 clerk:e2e
-          for i in $(seq 1 30); do
-            if curl -fsS http://localhost:8080/health >/dev/null; then exit 0; fi
-            sleep 2
-          done
-          echo "clerk did not become healthy"; docker logs clerk-e2e; exit 1
+      - name: Start the stack
+        # Clerk built from this checkout, with administrators signed in through
+        # a mock OIDC provider and authorized by a Bouncer stub.
+        run: docker compose -f e2e/compose.yml up -d --build --wait
       - name: Install the suite
         working-directory: e2e
         run: npm ci
@@ -104,18 +93,18 @@ jobs:
       - name: Run
         working-directory: e2e
         run: npx playwright test
-      - name: Clerk logs
+      - name: Stack logs
         if: failure()
-        run: docker logs clerk-e2e
+        run: docker compose -f e2e/compose.yml logs
       - uses: actions/upload-artifact@v7
         if: failure()
         with:
           name: playwright-traces
           path: e2e/test-results
           retention-days: 7
-      - name: Stop Clerk
+      - name: Stop the stack
         if: always()
-        run: docker rm -f clerk-e2e || true
+        run: docker compose -f e2e/compose.yml down -v || true
 
   build:
     name: build
@@ -140,16 +129,11 @@ jobs:
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v6
-      - name: Build image
-        run: docker build -t clerk:ci .
-      - name: Run container
-        # CLERK_ISSUER is required: without it the process exits immediately by
-        # design, and the healthcheck below would fail for the wrong reason.
-        run: |
-          docker run -d --name clerk \
-            -e CLERK_ISSUER=http://localhost:8080 \
-            -e CLERK_ADMIN_INSECURE=true \
-            -p 8080:8080 clerk:ci
+      - name: Build and run the image
+        # Clerk refuses to start without an issuer and admin sign-in, and it
+        # discovers the sign-in provider at startup, so it runs in the e2e
+        # stack, whose mock provider and Bouncer stub need no network access.
+        run: docker compose -f e2e/compose.yml up -d --build
       - name: Healthcheck
         run: |
           for i in $(seq 1 15); do
@@ -158,10 +142,10 @@ jobs:
             fi
             sleep 2
           done
-          echo "container did not become healthy"; docker logs clerk; exit 1
+          echo "container did not become healthy"; docker compose -f e2e/compose.yml logs; exit 1
       - name: Stop container
         if: always()
-        run: docker rm -f clerk || true
+        run: docker compose -f e2e/compose.yml down -v || true
 
   # Secret + dependency scan, toggled by the SECURITY_SCAN repo variable so it can
   # be flipped without editing this file. Deterministic tooling — no LLM in the loop.

@@ -36,13 +36,6 @@ type Config struct {
 	AccessTokenTTL time.Duration
 	IDTokenTTL     time.Duration
 
-	// AdminInsecure permits running with administration wide open, which is
-	// the only mode available until the external sign-in adapter lands. It
-	// must be set deliberately: defaulting to it would mean every image built
-	// from this source exposes application creation, secret regeneration and
-	// deletion to anyone who can reach the port.
-	AdminInsecure bool
-
 	// AdminProviders are the upstream sign-in providers to offer, keyed by the
 	// lowercase provider name.
 	AdminProviders map[string]OAuthCredentials
@@ -108,12 +101,6 @@ func Load(getenv Getenv) (*Config, error) {
 		*d.target = v
 	}
 
-	insecure, err := parseBool("CLERK_ADMIN_INSECURE", getenv("CLERK_ADMIN_INSECURE"))
-	if err != nil {
-		problems = append(problems, err)
-	}
-	cfg.AdminInsecure = insecure
-
 	cfg.BouncerURL = strings.TrimSpace(getenv("CLERK_BOUNCER_URL"))
 	cfg.BouncerAPIKey = strings.TrimSpace(getenv("CLERK_BOUNCER_API_KEY"))
 	cfg.BouncerRequiredRole = withDefault(getenv("CLERK_BOUNCER_REQUIRED_ROLE"), "admin")
@@ -161,13 +148,8 @@ func loadAdminProviders(getenv Getenv) (map[string]OAuthCredentials, []error) {
 }
 
 // validateAdminSetup rejects configurations that would leave administration
-// either wide open or impossible to reach.
+// unauthenticated or impossible to reach.
 func validateAdminSetup(cfg *Config) []error {
-	if cfg.AdminInsecure {
-		// The operator has explicitly chosen to run without authentication.
-		return nil
-	}
-
 	var problems []error
 	hasProviders := len(cfg.AdminProviders) > 0
 	hasBouncer := cfg.BouncerURL != "" && cfg.BouncerAPIKey != ""
@@ -176,7 +158,7 @@ func validateAdminSetup(cfg *Config) []error {
 	case !hasProviders && !hasBouncer:
 		problems = append(problems, errors.New(
 			"administration has no sign-in configured: set at least one CLERK_<PROVIDER>_CLIENT_ID/SECRET pair "+
-				"together with CLERK_BOUNCER_URL and CLERK_BOUNCER_API_KEY, or set CLERK_ADMIN_INSECURE=true to run without authentication"))
+				"together with CLERK_BOUNCER_URL and CLERK_BOUNCER_API_KEY"))
 	case !hasProviders:
 		problems = append(problems, errors.New(
 			"a role service is configured but no sign-in provider is: nobody could sign in"))
@@ -186,20 +168,6 @@ func validateAdminSetup(cfg *Config) []error {
 				"administrators could authenticate but nothing would authorize them"))
 	}
 	return problems
-}
-
-// parseBool accepts the spellings people actually type in a compose file.
-func parseBool(key, raw string) (bool, error) {
-	switch strings.ToLower(strings.TrimSpace(raw)) {
-	case "":
-		return false, nil
-	case "1", "true", "yes", "on":
-		return true, nil
-	case "0", "false", "no", "off":
-		return false, nil
-	default:
-		return false, fmt.Errorf("%s must be true or false, got %q", key, raw)
-	}
 }
 
 // parseIssuer enforces the shape OpenID Connect requires of an issuer

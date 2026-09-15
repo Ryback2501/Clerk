@@ -1,7 +1,16 @@
 import { defineConfig } from "@playwright/test";
+import path from "node:path";
 
-// Clerk is expected to be already running. CI starts the container before
-// invoking these tests; locally, `docker compose up -d` is enough.
+/**
+ * Where the signed-in administrator's cookies are kept for the other tests.
+ * Anchored to this file so the suite works from any working directory.
+ */
+export const adminState = path.join(__dirname, ".auth", "admin.json");
+
+// Clerk is expected to be already running, with its mock sign-in provider and
+// role service. CI starts the stack before invoking these tests; locally,
+// `docker compose -f e2e/compose.yml up -d --build --wait` from the repository
+// root does the same.
 const baseURL = process.env.CLERK_BASE_URL ?? "http://localhost:8080";
 
 export default defineConfig({
@@ -18,4 +27,13 @@ export default defineConfig({
     baseURL,
     trace: "retain-on-failure",
   },
+  projects: [
+    { name: "setup", testMatch: /auth\.setup\.ts/ },
+    {
+      name: "e2e",
+      testMatch: /\.spec\.ts/,
+      dependencies: ["setup"],
+      use: { storageState: adminState },
+    },
+  ],
 });

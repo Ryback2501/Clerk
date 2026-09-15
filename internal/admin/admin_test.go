@@ -16,6 +16,15 @@ import (
 	"github.com/Ryback2501/Clerk/internal/web"
 )
 
+// fakeAdmin authenticates every request as one fixed administrator. It exists
+// only in tests, so the handlers can be exercised without an OAuth round trip;
+// the shipped handler is always built with real sign-in.
+type fakeAdmin struct{}
+
+func (fakeAdmin) Authenticate(*http.Request) (*adminauth.Admin, error) {
+	return &adminauth.Admin{Subject: "test-admin", Provider: "test", Name: "Test administrator"}, nil
+}
+
 type harness struct {
 	t     *testing.T
 	mux   *http.ServeMux
@@ -35,9 +44,9 @@ func newHarness(t *testing.T) *harness {
 	}
 	t.Cleanup(func() { _ = s.Close() })
 
-	h, err := New(s, adminauth.AllowAll{}, true)
+	h, err := newHandler(s, fakeAdmin{}, nil)
 	if err != nil {
-		t.Fatalf("New(): %v", err)
+		t.Fatalf("newHandler(): %v", err)
 	}
 	mux := http.NewServeMux()
 	h.Register(mux)
@@ -117,10 +126,6 @@ func TestListApplicationsRendersEmptyState(t *testing.T) {
 	}
 	if !strings.Contains(rec.Body.String(), "No applications yet") {
 		t.Error("the empty state is not shown")
-	}
-	// The stub authenticator must be visible in the UI, not silent.
-	if !strings.Contains(rec.Body.String(), "Admin authentication is disabled") {
-		t.Error("the insecure-mode banner is missing")
 	}
 }
 
