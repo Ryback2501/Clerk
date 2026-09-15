@@ -1,0 +1,677 @@
+openapi: 3.1.0
+
+info:
+  title: Clerk OpenID Connect provider
+  version: "1.0"
+  summary: The HTTP interface third-party applications use to sign test users in.
+  description: |
+    Clerk is an OpenID Connect provider for development and testing. Applications
+    integrate with it exactly as with any other provider, using the Authorization
+    Code flow; signing in means picking a test identity rather than entering a
+    password.
+
+    Every path is relative to the configured issuer (`ISSUER`). An issuer with a
+    path prefix, such as `https://example.com/oidc`, serves discovery at
+    `https://example.com/oidc/.well-known/openid-configuration`.
+
+    Only the endpoints a client or an operator calls are described here. The admin
+    interface under `/admin` is a server-rendered UI and is not part of this API.
+  license:
+    name: MIT
+    identifier: MIT
+
+servers:
+  - url: "{issuer}"
+    variables:
+      issuer:
+        default: http://localhost:8080
+        description: The value of the ISSUER environment variable.
+
+tags:
+  - name: discovery
+    description: Provider metadata and signing keys.
+  - name: authorization
+    description: The browser-facing half of the Authorization Code flow.
+  - name: token
+    description: Exchanging an authorization code for tokens.
+  - name: userinfo
+    description: Claims about the signed-in test user.
+  - name: operations
+    description: Liveness for operators and container healthchecks.
+
+paths:
+  /.well-known/openid-configuration:
+    get:
+      tags: [discovery]
+      operationId: getDiscoveryDocument
+      security: []
+      summary: OpenID Provider Metadata
+      description: |
+        Advertises only what is implemented. Clients that support discovery need
+        nothing but this URL.
+      responses:
+        "200":
+          description: The provider metadata.
+          headers:
+            Cache-Control:
+              $ref: "#/components/headers/PublicCache"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DiscoveryDocument"
+
+  /jwks:
+    get:
+      tags: [discovery]
+      operationId: getJWKS
+      security: []
+      summary: JSON Web Key Set
+      description: |
+        The public key ID tokens are signed with. Select the key by the `kid` in
+        the ID token header. The key is generated on first start and kept, so it
+        only changes if the key file is lost.
+      responses:
+        "200":
+          description: The key set.
+          headers:
+            Cache-Control:
+              $ref: "#/components/headers/PublicCache"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/JWKS"
+
+  /authorize:
+    get:
+      tags: [authorization]
+      operationId: authorize
+      security: []
+      summary: Start the Authorization Code flow
+      description: |
+        The client sends the user's browser here. Clerk validates the request in
+        two phases:
+
+        1. `client_id` and `redirect_uri` must identify a registered application
+           and one of its registered redirect URIs, matched **exactly**. If either
+           check fails, Clerk shows an error page and never redirects, so an
+           unregistered URI cannot receive anything.
+        2. Once the redirect URI is trusted, any further problem is sent back to
+           it as an OAuth error (`error`, `error_description`, `state`).
+
+        On success Clerk shows its login page, where the user picks one of the
+        application's test users. Submitting it redirects to `redirect_uri` with
+        `code` and `state`. If the application has no test users, a page saying
+        so is shown instead.
+      parameters:
+        - name: client_id
+          in: query
+          required: true
+          description: The client ID shown when the application was registered.
+          schema:
+            type: string
+        - name: redirect_uri
+          in: query
+          required: true
+          description: Must equal one of the application's registered redirect URIs exactly.
+          schema:
+            type: string
+            format: uri
+        - name: response_type
+          in: query
+          required: true
+          description: Only the Authorization Code flow is supported.
+          schema:
+            type: string
+            enum: [code]
+        - name: scope
+          in: query
+          required: true
+          description: |
+            Space-separated. Must include `openid`. `profile` adds the `name`
+            claim. Any other scope (for example `email` or `offline_access`) is
+            dropped rather than rejected; the token response reports the scope
+            actually granted.
+          schema:
+            type: string
+            examples: ["openid profile"]
+        - name: state
+          in: query
+          required: false
+          description: Opaque value returned unchanged on the redirect. Recommended.
+          schema:
+            type: string
+        - name: nonce
+          in: query
+          required: false
+          description: Copied into the ID token's `nonce` claim. Recommended.
+          schema:
+            type: string
+        - name: code_challenge
+          in: query
+          required: false
+          description: |
+            PKCE challenge: base64url(SHA-256(code_verifier)) without padding.
+            Optional, but when present `code_challenge_method` must be `S256`.
+          schema:
+            type: string
+        - name: code_challenge_method
+          in: query
+          required: false
+          description: Only `S256`; `plain` is refused.
+          schema:
+            type: string
+            enum: [S256]
+      responses:
+        "200":
+          description: |
+            The login page listing the application's test users, or a page
+            explaining that the application has no test users yet.
+          content:
+            text/html:
+              schema:
+                type: string
+        "302":
+          description: |
+            The request was valid enough to trust `redirect_uri` but was refused.
+            The `Location` is the redirect URI with `error`, `error_description`
+            and, if one was sent, `state` added to its query. `error` is one of
+            `invalid_request`, `unsupported_response_type`, `invalid_scope` or
+            `server_error`.
+          headers:
+            Location:
+              description: "`<redirect_uri>?error=...&error_description=...&state=...`"
+              schema:
+                type: string
+                format: uri
+        "400":
+          description: |
+            Missing or unknown `client_id`, or a missing or unregistered
+            `redirect_uri`. Shown as an HTML error page; nothing is sent to the
+            client.
+          content:
+            text/html:
+              schema:
+                type: string
+        "500":
+          description: The application could not be loaded. HTML error page.
+          content:
+            text/html:
+              schema:
+                type: string
+    post:
+      tags: [authorization]
+      operationId: submitLogin
+      security: []
+      summary: Submit Clerk's login page (internal)
+      description: |
+        Posted by Clerk's own login page when the user presses Login. Clients
+        never call this; it is listed because it produces the redirect that
+        carries the authorization code. A rendered login page is valid for
+        15 minutes and can be submitted once.
+      requestBody:
+        required: true
+        content:
+          application/x-www-form-urlencoded:
+            schema:
+              type: object
+              required: [request_id, user_id, csrf_token]
+              properties:
+                request_id:
+                  type: string
+                  description: Identifies the pending authorization request.
+                user_id:
+                  type: string
+                  description: The selected test user.
+                csrf_token:
+                  type: string
+                  description: Must match the CSRF cookie set with the page.
+      responses:
+        "302":
+          description: |
+            Redirect to the client's `redirect_uri` with `code` and, if the client
+            sent one, `state`. The code is single-use and expires after
+            `CODE_TTL` (default one minute). If no user was selected, the redirect
+            carries `error=invalid_request` instead; if the code could not be
+            issued, `error=server_error`.
+          headers:
+            Location:
+              description: "`<redirect_uri>?code=...&state=...`"
+              schema:
+                type: string
+                format: uri
+        "400":
+          description: |
+            Failed CSRF validation, an expired or already-used login page, or a
+            user that does not belong to the application. HTML error page.
+          content:
+            text/html:
+              schema:
+                type: string
+        "500":
+          description: The sign-in could not be completed. HTML error page.
+          content:
+            text/html:
+              schema:
+                type: string
+
+  /token:
+    post:
+      tags: [token]
+      operationId: exchangeCode
+      summary: Exchange an authorization code for tokens
+      description: |
+        Called server-to-server by the client. The client authenticates with its
+        client ID and secret, either with HTTP Basic (preferred; each half
+        form-urlencoded before base64, per RFC 6749 §2.3.1) or as `client_id` and
+        `client_secret` form fields. HTTP Basic wins if both are sent.
+
+        The code must have been issued to this client, must come with the same
+        `redirect_uri` it was issued for, and must pass PKCE if a challenge was
+        sent. Once a valid, unexpired code has been presented by an authenticated
+        client, it is consumed even if a later check (issued to another client,
+        mismatched `redirect_uri`, failed PKCE) then fails. A request rejected
+        earlier, for a bad `grant_type`, bad client credentials or a missing
+        `code`, does not touch the code.
+
+        Presenting a consumed code again is treated as a leak: the attempt is
+        refused and the access token issued from the first exchange is revoked.
+        The ID token from that exchange cannot be revoked and stays valid until
+        its `exp`.
+      security:
+        - clientSecretBasic: []
+        - {}
+      requestBody:
+        required: true
+        content:
+          application/x-www-form-urlencoded:
+            schema:
+              type: object
+              required: [grant_type, code, redirect_uri]
+              properties:
+                grant_type:
+                  type: string
+                  enum: [authorization_code]
+                code:
+                  type: string
+                  description: The code received on the redirect.
+                redirect_uri:
+                  type: string
+                  format: uri
+                  description: Identical to the `redirect_uri` sent to `/authorize`.
+                code_verifier:
+                  type: string
+                  description: Required if, and only if, `/authorize` received a `code_challenge`.
+                client_id:
+                  type: string
+                  description: Only when not using HTTP Basic (`client_secret_post`).
+                client_secret:
+                  type: string
+                  description: Only when not using HTTP Basic (`client_secret_post`).
+      responses:
+        "200":
+          description: Tokens issued.
+          headers:
+            Cache-Control:
+              $ref: "#/components/headers/NoStore"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TokenResponse"
+        "400":
+          description: |
+            `invalid_request` (unparseable body, missing `code`),
+            `unsupported_grant_type` (anything but `authorization_code`), or
+            `invalid_grant` (unknown, expired or reused code; code issued to
+            another client; mismatched `redirect_uri`; failed PKCE; user deleted).
+          headers:
+            Cache-Control:
+              $ref: "#/components/headers/NoStore"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OAuthError"
+        "401":
+          description: "`invalid_client`: missing, unknown or wrong client credentials."
+          headers:
+            WWW-Authenticate:
+              description: '`Basic realm="clerk", charset="UTF-8"`'
+              schema:
+                type: string
+            Cache-Control:
+              $ref: "#/components/headers/NoStore"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OAuthError"
+        "500":
+          description: "`server_error`: the tokens could not be issued."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OAuthError"
+
+  /userinfo:
+    get:
+      tags: [userinfo]
+      operationId: getUserInfo
+      summary: Claims for the signed-in test user
+      security:
+        - bearerAccessToken: []
+      responses:
+        "200":
+          $ref: "#/components/responses/UserInfo"
+        "401":
+          $ref: "#/components/responses/UserInfoUnauthorized"
+        "500":
+          $ref: "#/components/responses/UserInfoServerError"
+    post:
+      tags: [userinfo]
+      operationId: postUserInfo
+      summary: Claims for the signed-in test user (POST)
+      description: |
+        Same as `GET`. The access token may be sent in the `Authorization` header
+        or, with a form-encoded body, as `access_token` (RFC 6750 §2.2). The
+        header takes precedence.
+      security:
+        - bearerAccessToken: []
+        - {}
+      requestBody:
+        required: false
+        content:
+          application/x-www-form-urlencoded:
+            schema:
+              type: object
+              properties:
+                access_token:
+                  type: string
+      responses:
+        "200":
+          $ref: "#/components/responses/UserInfo"
+        "401":
+          $ref: "#/components/responses/UserInfoUnauthorized"
+        "500":
+          $ref: "#/components/responses/UserInfoServerError"
+
+  /health:
+    get:
+      tags: [operations]
+      operationId: getHealth
+      security: []
+      summary: Liveness
+      description: |
+        Served at the server root (`/health`), even when the issuer has a path
+        prefix. Used by the image's built-in healthcheck.
+      responses:
+        "200":
+          description: The process is serving.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Health"
+
+components:
+  securitySchemes:
+    clientSecretBasic:
+      type: http
+      scheme: basic
+      description: |
+        `client_secret_basic`: the client ID and secret as HTTP Basic credentials.
+        The alternative, `client_secret_post`, sends them as form fields instead.
+    bearerAccessToken:
+      type: http
+      scheme: bearer
+      description: The opaque access token returned by `/token`.
+
+  headers:
+    PublicCache:
+      description: "`public, max-age=300`"
+      schema:
+        type: string
+    NoStore:
+      description: "`no-store`; the body carries credentials."
+      schema:
+        type: string
+
+  responses:
+    UserInfo:
+      description: The user's claims.
+      headers:
+        Cache-Control:
+          $ref: "#/components/headers/NoStore"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/UserInfo"
+    UserInfoUnauthorized:
+      description: |
+        No usable access token. When none was sent at all, the challenge carries
+        no error and the body is `{}`, so a client can tell a stripped header from
+        a rejected token. When the token is unknown or expired, both carry
+        `invalid_token`.
+      headers:
+        WWW-Authenticate:
+          description: |
+            `Bearer realm="clerk"`, or
+            `Bearer realm="clerk", error="invalid_token", error_description="..."`
+          schema:
+            type: string
+      content:
+        application/json:
+          schema:
+            oneOf:
+              - type: object
+                maxProperties: 0
+              - $ref: "#/components/schemas/OAuthError"
+    UserInfoServerError:
+      description: "`server_error`."
+      content:
+        application/json:
+          schema:
+            type: object
+            required: [error]
+            properties:
+              error:
+                type: string
+                const: server_error
+
+  schemas:
+    DiscoveryDocument:
+      type: object
+      description: The values Clerk returns are shown as `const` or `examples`.
+      required:
+        - issuer
+        - authorization_endpoint
+        - token_endpoint
+        - userinfo_endpoint
+        - jwks_uri
+        - response_types_supported
+        - grant_types_supported
+        - subject_types_supported
+        - id_token_signing_alg_values_supported
+        - scopes_supported
+        - token_endpoint_auth_methods_supported
+        - code_challenge_methods_supported
+        - claims_supported
+      properties:
+        issuer:
+          type: string
+          format: uri
+          examples: [http://localhost:8080]
+        authorization_endpoint:
+          type: string
+          format: uri
+          examples: [http://localhost:8080/authorize]
+        token_endpoint:
+          type: string
+          format: uri
+          examples: [http://localhost:8080/token]
+        userinfo_endpoint:
+          type: string
+          format: uri
+          examples: [http://localhost:8080/userinfo]
+        jwks_uri:
+          type: string
+          format: uri
+          examples: [http://localhost:8080/jwks]
+        response_types_supported:
+          type: array
+          items: { type: string }
+          examples: [[code]]
+        grant_types_supported:
+          type: array
+          items: { type: string }
+          examples: [[authorization_code]]
+        subject_types_supported:
+          type: array
+          items: { type: string }
+          examples: [[public]]
+        id_token_signing_alg_values_supported:
+          type: array
+          items: { type: string }
+          examples: [[RS256]]
+        scopes_supported:
+          type: array
+          items: { type: string }
+          examples: [[openid, profile]]
+        token_endpoint_auth_methods_supported:
+          type: array
+          items: { type: string }
+          examples: [[client_secret_basic, client_secret_post]]
+        code_challenge_methods_supported:
+          type: array
+          items: { type: string }
+          examples: [[S256]]
+        claims_supported:
+          type: array
+          items: { type: string }
+          examples: [[iss, sub, aud, iat, exp, nonce, name]]
+
+    JWKS:
+      type: object
+      required: [keys]
+      properties:
+        keys:
+          type: array
+          items:
+            $ref: "#/components/schemas/JWK"
+
+    JWK:
+      type: object
+      description: An RSA public key (RFC 7517).
+      required: [kty, kid, alg, use, n, e]
+      properties:
+        kty:
+          type: string
+          const: RSA
+        kid:
+          type: string
+          description: Matches the `kid` header of ID tokens signed with this key.
+        alg:
+          type: string
+          const: RS256
+        use:
+          type: string
+          const: sig
+        n:
+          type: string
+          description: Modulus, base64url.
+        e:
+          type: string
+          description: Exponent, base64url.
+
+    TokenResponse:
+      type: object
+      required: [access_token, token_type, expires_in, id_token, scope]
+      properties:
+        access_token:
+          type: string
+          description: |
+            Opaque bearer token for `/userinfo`. It is not a JWT and carries no
+            claims of its own.
+        token_type:
+          type: string
+          const: Bearer
+        expires_in:
+          type: integer
+          description: Access token lifetime in seconds (`ACCESS_TOKEN_TTL`, default 3600).
+          examples: [3600]
+        id_token:
+          type: string
+          description: |
+            A JWS compact serialization signed with RS256. Its payload is
+            described by `IDTokenClaims`.
+        scope:
+          type: string
+          description: The scope actually granted, e.g. `openid profile`.
+          examples: ["openid profile"]
+      description: No `refresh_token` is ever issued.
+
+    IDTokenClaims:
+      type: object
+      description: |
+        The payload of the ID token. Not a response body on its own: decode it
+        from `TokenResponse.id_token` after verifying the signature against
+        `/jwks`. The header has `alg: RS256`, `typ: JWT` and the signing `kid`.
+      required: [iss, sub, aud, iat, exp]
+      properties:
+        iss:
+          type: string
+          format: uri
+          description: The issuer, exactly as in the discovery document.
+        sub:
+          type: string
+          description: |
+            The test user's subject: 128 random bits, base64url. Stable for the
+            user's lifetime and unique across the provider, so the same username
+            in two applications has two different subjects.
+        aud:
+          type: string
+          description: The client ID the token was issued to.
+        iat:
+          type: integer
+          description: Issued-at, seconds since the epoch.
+        exp:
+          type: integer
+          description: Expiry, seconds since the epoch (`ID_TOKEN_TTL` after `iat`, default one hour).
+        nonce:
+          type: string
+          description: The `nonce` sent to `/authorize`; present only if one was sent.
+        name:
+          type: string
+          description: The test user's username; present only when `profile` was granted.
+
+    UserInfo:
+      type: object
+      required: [sub]
+      properties:
+        sub:
+          type: string
+          description: Same value as the ID token's `sub`.
+        name:
+          type: string
+          description: The test user's username; present only when the token's scope includes `profile`.
+
+    OAuthError:
+      type: object
+      required: [error, error_description]
+      properties:
+        error:
+          type: string
+          enum:
+            - invalid_request
+            - invalid_client
+            - invalid_grant
+            - unsupported_grant_type
+            - invalid_token
+            - server_error
+        error_description:
+          type: string
+          description: Human-readable detail, for logs rather than end users.
+
+    Health:
+      type: object
+      required: [status]
+      properties:
+        status:
+          type: string
+          const: ok
