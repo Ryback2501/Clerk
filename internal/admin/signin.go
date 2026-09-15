@@ -32,7 +32,7 @@ func (h *Handler) showSignIn(w http.ResponseWriter, r *http.Request) {
 	}
 
 	data := h.newPageData(w, r, nil, "Sign in")
-	data.Providers = h.oauth.EnabledProviders()
+	data.Providers = providerButtonsFor(h.oauth.EnabledProviders())
 	data.Error = signInMessage(r.URL.Query().Get("error"))
 	h.render(w, r, "signin", http.StatusOK, data)
 }

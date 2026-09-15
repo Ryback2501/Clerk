@@ -11,7 +11,7 @@ import (
 
 func (h *harness) createUser(appID int64, name string) *httptest.ResponseRecorder {
 	h.t.Helper()
-	return h.post("/admin/applications/"+itoa(appID)+"/users", url.Values{"username": {name}})
+	return h.post(appPath(appID)+"/users", url.Values{"username": {name}})
 }
 
 // Acceptance criterion 8.
@@ -19,8 +19,9 @@ func TestCreateUserThroughTheAdminUI(t *testing.T) {
 	h := newHarness(t)
 	app := h.createApp("App", "https://a.example.com/cb")
 
-	if got := h.createUser(app, "david"); got.Code != http.StatusSeeOther {
-		t.Fatalf("create user returned %d, want 303: %s", got.Code, got.Body.String())
+	got := h.createUser(app, "david")
+	if got.Code != http.StatusOK {
+		t.Fatalf("create user returned %d, want 200: %s", got.Code, got.Body.String())
 	}
 
 	users, err := h.store.ListUsers(context.Background(), app)
@@ -31,14 +32,17 @@ func TestCreateUserThroughTheAdminUI(t *testing.T) {
 		t.Fatalf("users = %v, want one named david", users)
 	}
 
-	body := h.get("/admin/applications/" + itoa(app)).Body.String()
-	if !strings.Contains(body, "david") {
-		t.Error("the new user is not listed on the application page")
+	body := got.Body.String()
+	if !strings.Contains(body, "<td>david</td>") {
+		t.Error("the refreshed panel does not list the new user")
 	}
 	// The sub is the stable account identifier a client will store, so an
 	// administrator debugging an integration needs to be able to read it.
 	if !strings.Contains(body, users[0].Sub) {
 		t.Error("the user's sub is not shown, leaving no way to correlate it with a client")
+	}
+	if !strings.Contains(body, `data-user-count="1"`) {
+		t.Error("the refreshed panel does not report the new user count")
 	}
 }
 
@@ -53,8 +57,12 @@ func TestDuplicateUsernameIsRejectedInTheUI(t *testing.T) {
 	if got.Code != http.StatusUnprocessableEntity {
 		t.Fatalf("duplicate username returned %d, want 422", got.Code)
 	}
-	if !strings.Contains(got.Body.String(), "already exists") {
+	body := got.Body.String()
+	if !strings.Contains(body, "already exists") {
 		t.Error("the error message does not explain the conflict")
+	}
+	if !strings.Contains(body, `name="username" value="david"`) {
+		t.Error("the rejected username was not kept in the form")
 	}
 
 	users, _ := h.store.ListUsers(context.Background(), app)
@@ -70,8 +78,8 @@ func TestSameUsernameIsAllowedInADifferentApplication(t *testing.T) {
 	second := h.createApp("Second", "https://b.example.com/cb")
 
 	h.createUser(first, "david")
-	if got := h.createUser(second, "david"); got.Code != http.StatusSeeOther {
-		t.Fatalf("the same username in another application returned %d, want 303", got.Code)
+	if got := h.createUser(second, "david"); got.Code != http.StatusOK {
+		t.Fatalf("the same username in another application returned %d, want 200", got.Code)
 	}
 
 	a, _ := h.store.ListUsers(context.Background(), first)
@@ -96,9 +104,12 @@ func TestDeleteUserLeavesTheApplicationAndOtherUsersAlone(t *testing.T) {
 		}
 	}
 
-	rec := h.post("/admin/applications/"+itoa(app)+"/users/"+itoa(doomed)+"/delete", url.Values{})
-	if rec.Code != http.StatusSeeOther {
-		t.Fatalf("delete user returned %d, want 303", rec.Code)
+	rec := h.post(appPath(app)+"/users/"+itoa(doomed)+"/delete", url.Values{})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("delete user returned %d, want 200", rec.Code)
+	}
+	if strings.Contains(rec.Body.String(), "<td>david</td>") {
+		t.Error("the refreshed panel still lists the deleted user")
 	}
 
 	remaining, _ := h.store.ListUsers(context.Background(), app)
@@ -121,9 +132,9 @@ func TestUserCannotBeDeletedThroughAnotherApplication(t *testing.T) {
 	users, _ := h.store.ListUsers(context.Background(), owner)
 	victim := users[0].ID
 
-	rec := h.post("/admin/applications/"+itoa(other)+"/users/"+itoa(victim)+"/delete", url.Values{})
-	if rec.Code == http.StatusSeeOther {
-		t.Error("a user was deleted through an application that does not own them")
+	rec := h.post(appPath(other)+"/users/"+itoa(victim)+"/delete", url.Values{})
+	if rec.Code != http.StatusNotFound {
+		t.Errorf("deleting through a foreign application returned %d, want 404", rec.Code)
 	}
 
 	if _, err := h.store.GetUser(context.Background(), victim); err != nil {
@@ -138,11 +149,11 @@ func TestUserRoutesRequireCSRF(t *testing.T) {
 	users, _ := h.store.ListUsers(context.Background(), app)
 
 	for _, path := range []string{
-		"/admin/applications/" + itoa(app) + "/users",
-		"/admin/applications/" + itoa(app) + "/users/" + itoa(users[0].ID) + "/delete",
+		appPath(app) + "/users",
+		appPath(app) + "/users/" + itoa(users[0].ID) + "/delete",
 	} {
 		req := newForm(http.MethodPost, path, "username=x")
-		rec := newRecorder()
+		rec := httptest.NewRecorder()
 		h.mux.ServeHTTP(rec, req)
 		if rec.Code != http.StatusForbidden {
 			t.Errorf("POST %s without a CSRF token = %d, want 403", path, rec.Code)
@@ -156,7 +167,7 @@ func TestUsernameIsEscapedInTheUI(t *testing.T) {
 	app := h.createApp("App", "https://a.example.com/cb")
 	h.createUser(app, `<img src=x onerror=alert(1)>`)
 
-	body := h.get("/admin/applications/" + itoa(app)).Body.String()
+	body := h.get(appPath(app)).Body.String()
 	if strings.Contains(body, "<img src=x") {
 		t.Error("the username was rendered unescaped")
 	}
@@ -172,7 +183,7 @@ func TestUsersOfOtherApplicationsAreNotListed(t *testing.T) {
 	h.createUser(first, "only-in-first")
 	h.createUser(second, "only-in-second")
 
-	body := h.get("/admin/applications/" + itoa(first)).Body.String()
+	body := h.get(appPath(first)).Body.String()
 	if strings.Contains(body, "only-in-second") {
 		t.Error("another application's user is listed")
 	}

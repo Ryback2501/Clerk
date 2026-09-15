@@ -1,22 +1,23 @@
 {{define "content" -}}
-<hgroup>
-  <h1>Sign in</h1>
-  <p>Administration of this OpenID Connect provider.</p>
-</hgroup>
+<h4 class="auth-title">Hello! let's get started</h4>
+<h6 class="auth-subtitle">Sign in to continue.</h6>
 
-{{if .Error}}<p role="alert"><strong>{{.Error}}</strong></p>{{end}}
+{{if .Error}}<p class="alert alert-danger" role="alert">{{.Error}}</p>{{end}}
 
 {{if .Providers}}
-<p>Continue with:</p>
-{{range .Providers}}
-  <p><a href="/admin/auth/{{.}}/start" role="button" class="secondary">{{.}}</a></p>
-{{end}}
-<p><small class="muted">
+<div class="auth-providers">
+  {{range .Providers}}
+  <a class="btn btn-block btn-lg btn-provider {{.Class}}" href="/admin/auth/{{.ID}}/start">
+    {{- if .Icon}}<span class="btn-icon">{{.Icon}}</span>{{end}}{{.Label -}}
+  </a>
+  {{end}}
+</div>
+<p class="auth-note">
   Signing in proves who you are. Whether you may administer this provider is decided
   separately by the role service.
-</small></p>
+</p>
 {{else}}
-<p role="alert">
+<p class="alert alert-warning" role="alert">
   No sign-in providers are configured, so nobody can sign in. An operator must
   configure at least one.
 </p>

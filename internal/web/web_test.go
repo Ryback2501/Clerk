@@ -29,6 +29,26 @@ func TestStylesheetIsServed(t *testing.T) {
 	}
 }
 
+func TestAdminAssetsAreServed(t *testing.T) {
+	for _, tc := range []struct{ file, contentType string }{
+		{"admin.css", "css"},
+		{"admin.js", "javascript"},
+		{"nunito.woff2", ""},
+	} {
+		rec := serve(t, StaticPath+tc.file)
+		if rec.Code != http.StatusOK {
+			t.Errorf("GET %s = %d, want 200", tc.file, rec.Code)
+			continue
+		}
+		if ct := rec.Header().Get("Content-Type"); !strings.Contains(ct, tc.contentType) {
+			t.Errorf("%s Content-Type = %q, want %s", tc.file, ct, tc.contentType)
+		}
+		if rec.Body.Len() < 1000 {
+			t.Errorf("%s is only %d bytes; the asset is probably missing", tc.file, rec.Body.Len())
+		}
+	}
+}
+
 func TestAssetDirectoryIsNotBrowsable(t *testing.T) {
 	rec := serve(t, StaticPath)
 	if rec.Code == http.StatusOK && strings.Contains(rec.Body.String(), "pico.min.css") {

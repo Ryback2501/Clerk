@@ -15,7 +15,8 @@ info:
     `https://example.com/oidc/.well-known/openid-configuration`.
 
     Only the endpoints a client or an operator calls are described here. The admin
-    interface under `/admin` is a server-rendered UI and is not part of this API.
+    interface under `/admin` is a browser UI whose internal routes return HTML
+    fragments; it is not part of this API.
   license:
     name: MIT
     identifier: MIT

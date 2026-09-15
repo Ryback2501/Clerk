@@ -1,43 +1,61 @@
+{{define "head" -}}
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{{.Title}} — Clerk</title>
+  <link rel="stylesheet" href="/static/admin.css">
+{{- end}}
+
+{{define "logo" -}}
+<span class="brand">
+  <svg class="brand-mark" viewBox="0 0 32 32" aria-hidden="true">
+    <rect width="32" height="32" rx="9" fill="#4B49AC"/>
+    <path d="M21.5 11.2a7 7 0 1 0 0 9.6" fill="none" stroke="#fff" stroke-width="3.2" stroke-linecap="round"/>
+    <circle cx="22.4" cy="16" r="2.2" fill="#7DA0FA"/>
+  </svg>
+  <span class="brand-name">Clerk</span>
+</span>
+{{- end}}
+
 {{define "layout" -}}
 <!DOCTYPE html>
 <html lang="en">
 <head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>{{.Title}} — Clerk</title>
-  <link rel="stylesheet" href="/static/pico.min.css">
-  <style>
-    :root { --pico-font-size: 100%; }
-    body > header, body > main, body > footer { padding-block: 1rem; }
-    .muted { color: var(--pico-muted-color); }
-    code.value { word-break: break-all; user-select: all; }
-    .danger { --pico-primary: var(--pico-del-color); }
-    table { font-size: .95em; }
-  </style>
+  {{template "head" .}}
+  <script src="/static/admin.js" defer></script>
 </head>
-<body>
-<header class="container">
-  <nav>
-    <ul><li><strong><a href="/admin">Clerk</a></strong></li></ul>
-    <ul>
-      <li class="muted">{{.Admin.Name}}</li>
-      {{if .SignedIn}}
-      <li>
-        <form method="post" action="/admin/signout" style="margin:0">
-          <input type="hidden" name="{{.CSRFField}}" value="{{.CSRFToken}}">
-          <button type="submit" class="secondary outline">Sign out</button>
-        </form>
-      </li>
-      {{end}}
-    </ul>
-  </nav>
+<body class="app">
+<header class="topbar">
+  <a class="topbar-brand" href="/admin" aria-label="Clerk applications">{{template "logo"}}</a>
+  <div class="topbar-end">
+    <span class="topbar-user">{{.Admin.Name}}</span>
+    {{if .SignedIn}}
+    <form method="post" action="/admin/signout">
+      <input type="hidden" name="{{.CSRFField}}" value="{{.CSRFToken}}">
+      <button type="submit" class="btn btn-sm btn-inverse-primary">Sign out</button>
+    </form>
+    {{end}}
+  </div>
 </header>
-<main class="container">
+<main class="content">
 {{template "content" .}}
 </main>
-<footer class="container">
-  <small class="muted">Clerk — an OpenID Connect provider for development and testing. Not for authenticating real users.</small>
-</footer>
+</body>
+</html>
+{{- end}}
+
+{{define "auth-layout" -}}
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  {{template "head" .}}
+</head>
+<body class="auth">
+<main class="auth-wrapper">
+  <div class="auth-card">
+    <div class="auth-brand">{{template "logo"}}</div>
+    {{template "content" .}}
+  </div>
+</main>
 </body>
 </html>
 {{- end}}
