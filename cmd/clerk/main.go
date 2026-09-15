@@ -123,22 +123,9 @@ func run(logger *slog.Logger) error {
 	return nil
 }
 
-// buildAdmin wires the administration interface, with real authentication
-// where it is configured and an open stand-in only where the operator has
-// explicitly asked for one.
+// buildAdmin wires the administration interface behind external sign-in and
+// the role service. There is no unauthenticated mode.
 func buildAdmin(ctx context.Context, cfg *config.Config, db *store.Store, logger *slog.Logger) (*admin.Handler, error) {
-	if cfg.AdminInsecure {
-		// Configuration already refuses this unless it was asked for; saying
-		// so again at startup means an open interface is never silent.
-		logger.Warn(adminauth.Warning)
-
-		handler, err := admin.New(db, adminauth.AllowAll{}, true)
-		if err != nil {
-			return nil, fmt.Errorf("admin interface: %w", err)
-		}
-		return handler.WithLogger(logger), nil
-	}
-
 	bouncer, err := adminauth.NewBouncer(adminauth.BouncerConfig{
 		BaseURL:      cfg.BouncerURL,
 		APIKey:       cfg.BouncerAPIKey,

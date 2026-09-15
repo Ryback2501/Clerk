@@ -42,37 +42,26 @@ type Handler struct {
 	csrf   *web.CSRF
 	reveal *revealStore
 	pages  map[string]*template.Template
-
-	// insecure records that admin authentication is a no-op, so the UI can say
-	// so on every page rather than leaving it to be discovered.
-	insecure bool
-}
-
-// New builds the admin handler with an authenticator that does not
-// authenticate. The interface warns about it on every page.
-func New(s *store.Store, auth adminauth.Authenticator, insecure bool) (*Handler, error) {
-	return newHandler(s, auth, nil, insecure)
 }
 
 // NewWithOAuth builds the admin handler backed by real sign-in.
 func NewWithOAuth(s *store.Store, oauth *adminauth.OAuth) (*Handler, error) {
-	return newHandler(s, oauth, oauth, false)
+	return newHandler(s, oauth, oauth)
 }
 
-func newHandler(s *store.Store, auth adminauth.Authenticator, oauth *adminauth.OAuth, insecure bool) (*Handler, error) {
+func newHandler(s *store.Store, auth adminauth.Authenticator, oauth *adminauth.OAuth) (*Handler, error) {
 	pages, err := parsePages()
 	if err != nil {
 		return nil, err
 	}
 	return &Handler{
-		store:    s,
-		auth:     auth,
-		oauth:    oauth,
-		logger:   slog.Default(),
-		csrf:     web.NewCSRF(web.AdminCSRFCookie),
-		reveal:   newRevealStore(),
-		pages:    pages,
-		insecure: insecure,
+		store:  s,
+		auth:   auth,
+		oauth:  oauth,
+		logger: slog.Default(),
+		csrf:   web.NewCSRF(web.AdminCSRFCookie),
+		reveal: newRevealStore(),
+		pages:  pages,
 	}, nil
 }
 

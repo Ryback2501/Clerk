@@ -11,13 +11,14 @@ func envMap(m map[string]string) Getenv {
 	return func(k string) string { return m[k] }
 }
 
-// runnable adds the minimum administration setting a configuration needs to be
+// runnable adds the minimum administration setup a configuration needs to be
 // accepted, so a test about something else does not have to restate it.
 func runnable(m map[string]string) Getenv {
-	if _, set := m["CLERK_ADMIN_INSECURE"]; !set {
-		if m["CLERK_GOOGLE_CLIENT_ID"] == "" && m["CLERK_BOUNCER_URL"] == "" {
-			m["CLERK_ADMIN_INSECURE"] = "true"
-		}
+	if m["CLERK_GOOGLE_CLIENT_ID"] == "" && m["CLERK_BOUNCER_URL"] == "" {
+		m["CLERK_BOUNCER_URL"] = "http://bouncer.internal"
+		m["CLERK_BOUNCER_API_KEY"] = "bncr_test"
+		m["CLERK_GOOGLE_CLIENT_ID"] = "google-id"
+		m["CLERK_GOOGLE_CLIENT_SECRET"] = "google-secret"
 	}
 	return envMap(m)
 }
@@ -161,61 +162,6 @@ func TestLoadReportsAllProblemsAtOnce(t *testing.T) {
 	}
 }
 
-// Until real admin authentication exists, the interface is open to anyone who
-// can reach the port. Running in that state has to be a deliberate, explicit
-// act rather than the default.
-func TestAdminInsecureMustBeOptedInto(t *testing.T) {
-	// A configuration with real administration set up must not be insecure.
-	configured := map[string]string{
-		"CLERK_ISSUER":               "http://localhost:8080",
-		"CLERK_BOUNCER_URL":          "http://bouncer",
-		"CLERK_BOUNCER_API_KEY":      "bncr_k",
-		"CLERK_GOOGLE_CLIENT_ID":     "id",
-		"CLERK_GOOGLE_CLIENT_SECRET": "secret",
-	}
-
-	cfg, err := Load(envMap(configured))
-	if err != nil {
-		t.Fatalf("Load() error: %v", err)
-	}
-	if cfg.AdminInsecure {
-		t.Error("AdminInsecure defaults to true; an unauthenticated admin UI must be opt-in")
-	}
-
-	for _, v := range []string{"1", "true", "TRUE", "yes"} {
-		cfg, err := Load(envMap(map[string]string{
-			"CLERK_ISSUER": "http://localhost:8080", "CLERK_ADMIN_INSECURE": v,
-		}))
-		if err != nil {
-			t.Fatalf("Load() with CLERK_ADMIN_INSECURE=%q: %v", v, err)
-		}
-		if !cfg.AdminInsecure {
-			t.Errorf("CLERK_ADMIN_INSECURE=%q did not enable insecure admin mode", v)
-		}
-	}
-
-	// Explicitly false is only valid alongside real administration config.
-	for _, v := range []string{"0", "false", "no", ""} {
-		env := map[string]string{"CLERK_ADMIN_INSECURE": v}
-		for k, val := range configured {
-			env[k] = val
-		}
-		cfg, err := Load(envMap(env))
-		if err != nil {
-			t.Fatalf("Load() with CLERK_ADMIN_INSECURE=%q: %v", v, err)
-		}
-		if cfg.AdminInsecure {
-			t.Errorf("CLERK_ADMIN_INSECURE=%q enabled insecure admin mode", v)
-		}
-	}
-
-	if _, err := Load(envMap(map[string]string{
-		"CLERK_ISSUER": "http://localhost:8080", "CLERK_ADMIN_INSECURE": "maybe",
-	})); err == nil {
-		t.Error("an unrecognised CLERK_ADMIN_INSECURE value was accepted")
-	}
-}
-
 func TestTokenLifetimesMustBeAtLeastOneSecond(t *testing.T) {
 	for _, key := range []string{"CLERK_CODE_TTL", "CLERK_ACCESS_TOKEN_TTL", "CLERK_ID_TOKEN_TTL"} {
 		t.Run(key, func(t *testing.T) {
@@ -285,20 +231,12 @@ func TestHalfConfiguredProviderIsRejected(t *testing.T) {
 	}
 }
 
-// Without the insecure opt-in, real administration configuration is required —
-// otherwise there is no way in at all.
-func TestAdminConfigurationIsRequiredUnlessInsecure(t *testing.T) {
+// Real administration configuration is always required: there is no way to
+// run the admin interface unauthenticated.
+func TestAdminConfigurationIsRequired(t *testing.T) {
 	_, err := Load(envMap(map[string]string{"CLERK_ISSUER": "https://clerk.example.com"}))
 	if err == nil {
-		t.Fatal("a configuration with neither admin auth nor the insecure opt-in was accepted")
-	}
-
-	// The insecure opt-in stands in for all of it.
-	if _, err := Load(envMap(map[string]string{
-		"CLERK_ISSUER":         "https://clerk.example.com",
-		"CLERK_ADMIN_INSECURE": "true",
-	})); err != nil {
-		t.Errorf("the insecure opt-in was rejected: %v", err)
+		t.Fatal("a configuration without admin sign-in was accepted")
 	}
 }
 

@@ -1,9 +1,13 @@
 # Clerk — an OpenID Connect provider for development and testing.
 #
-# This file runs Clerk with administration wide open, which is the quickest way
-# to try it locally. For anything reachable by anyone else, delete
-# CLERK_ADMIN_INSECURE and configure real sign-in instead: see the "Administration
-# access" section of the README.
+# Administration always requires signing in with an external provider, and
+# Bouncer decides who may administer. Set the variables below (in the
+# environment or a .env file next to this one) as described in the
+# "Administration access" section of the README. Compose refuses to start
+# without the Bouncer settings, and Clerk without at least one provider.
+#
+# To try Clerk locally without either, use e2e/compose.yml instead: it runs a
+# mock sign-in provider and a Bouncer stub alongside it.
 
 services:
   clerk:
@@ -16,17 +20,24 @@ services:
     environment:
       # Must match what clients are configured with, exactly. It is published as
       # the issuer and stamped into every ID token.
-      CLERK_ISSUER: http://localhost:8080
+      CLERK_ISSUER: ${CLERK_ISSUER:-http://localhost:8080}
 
-      # Administration is unauthenticated in this configuration.
-      CLERK_ADMIN_INSECURE: "true"
+      # The role service that authorizes administrators.
+      CLERK_BOUNCER_URL: ${CLERK_BOUNCER_URL:?set CLERK_BOUNCER_URL, e.g. http://bouncer:3000}
+      CLERK_BOUNCER_API_KEY: ${CLERK_BOUNCER_API_KEY:?set CLERK_BOUNCER_API_KEY to the bncr_ key Bouncer issued}
+      CLERK_BOUNCER_REQUIRED_ROLE: ${CLERK_BOUNCER_REQUIRED_ROLE:-admin}
 
-      # Real administration instead of the line above:
-      # CLERK_BOUNCER_URL: http://bouncer:3000
-      # CLERK_BOUNCER_API_KEY: bncr_...
-      # CLERK_BOUNCER_REQUIRED_ROLE: admin
-      # CLERK_GOOGLE_CLIENT_ID: ...
-      # CLERK_GOOGLE_CLIENT_SECRET: ...
+      # At least one sign-in provider; Clerk refuses to start without one. Set
+      # the pair for each provider you use and leave the others empty.
+      CLERK_GOOGLE_CLIENT_ID: ${CLERK_GOOGLE_CLIENT_ID:-}
+      CLERK_GOOGLE_CLIENT_SECRET: ${CLERK_GOOGLE_CLIENT_SECRET:-}
+      CLERK_GITHUB_CLIENT_ID: ${CLERK_GITHUB_CLIENT_ID:-}
+      CLERK_GITHUB_CLIENT_SECRET: ${CLERK_GITHUB_CLIENT_SECRET:-}
+      CLERK_MICROSOFT_CLIENT_ID: ${CLERK_MICROSOFT_CLIENT_ID:-}
+      CLERK_MICROSOFT_CLIENT_SECRET: ${CLERK_MICROSOFT_CLIENT_SECRET:-}
+      CLERK_MICROSOFT_ISSUER: ${CLERK_MICROSOFT_ISSUER:-}
+      CLERK_LINKEDIN_CLIENT_ID: ${CLERK_LINKEDIN_CLIENT_ID:-}
+      CLERK_LINKEDIN_CLIENT_SECRET: ${CLERK_LINKEDIN_CLIENT_SECRET:-}
     volumes:
       # Both must persist. Losing the key invalidates every token ever issued;
       # losing the database loses every registered client and test user.
