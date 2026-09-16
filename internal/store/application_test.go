@@ -365,3 +365,141 @@ func TestCountUsers(t *testing.T) {
 		t.Errorf("CountUsers() = %d, want 3", got)
 	}
 }
+
+// Two applications with the same name are indistinguishable in the admin list,
+// so the name is claimed exclusively — ignoring case and surrounding or
+// repeated whitespace, which the eye does not distinguish either.
+func TestCreateApplicationRejectsADuplicateName(t *testing.T) {
+	s := openTemp(t)
+	createApp(t, s, "My Test Application")
+
+	for _, name := range []string{
+		"My Test Application",
+		"my test application",
+		"  My Test Application  ",
+		"My  Test   Application",
+	} {
+		t.Run(name, func(t *testing.T) {
+			_, _, err := s.CreateApplication(ctx(), name, nil)
+			if !errors.Is(err, ErrValidation) {
+				t.Fatalf("CreateApplication(%q) error = %v, want a validation error", name, err)
+			}
+			if !strings.Contains(err.Error(), "already exists") {
+				t.Errorf("error = %v, want it to say the name already exists", err)
+			}
+		})
+	}
+
+	apps, err := s.ListApplications(ctx())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(apps) != 1 {
+		t.Errorf("%d applications exist, want the one that was created", len(apps))
+	}
+}
+
+func TestRenameApplication(t *testing.T) {
+	s := openTemp(t)
+	app, _ := createApp(t, s, "Before", "https://a.example.com/cb")
+	if _, err := s.CreateUser(ctx(), app.ID, "david"); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := s.RenameApplication(ctx(), app.ID, "  After  "); err != nil {
+		t.Fatalf("RenameApplication() error: %v", err)
+	}
+
+	renamed, err := s.GetApplication(ctx(), app.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if renamed.Name != "After" {
+		t.Errorf("name = %q, want the trimmed new name", renamed.Name)
+	}
+	// Renaming is only a label change: nothing a client depends on may move.
+	if renamed.ClientID != app.ClientID {
+		t.Error("the client id changed with the name")
+	}
+	if len(renamed.RedirectURIs) != 1 {
+		t.Errorf("redirect URIs = %v, want them kept", renamed.RedirectURIs)
+	}
+	users, err := s.ListUsers(ctx(), app.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(users) != 1 {
+		t.Errorf("%d users survived the rename, want 1", len(users))
+	}
+}
+
+func TestRenameApplicationRejectsANameInUse(t *testing.T) {
+	s := openTemp(t)
+	first, _ := createApp(t, s, "First")
+	createApp(t, s, "Second")
+
+	err := s.RenameApplication(ctx(), first.ID, "second")
+	if !errors.Is(err, ErrValidation) {
+		t.Fatalf("error = %v, want a validation error", err)
+	}
+
+	unchanged, _ := s.GetApplication(ctx(), first.ID)
+	if unchanged.Name != "First" {
+		t.Errorf("name = %q, want it unchanged after a rejected rename", unchanged.Name)
+	}
+}
+
+// An application never collides with itself, so its own name may be restyled.
+func TestRenameApplicationAcceptsItsOwnName(t *testing.T) {
+	s := openTemp(t)
+	app, _ := createApp(t, s, "My Application")
+
+	if err := s.RenameApplication(ctx(), app.ID, "MY APPLICATION"); err != nil {
+		t.Fatalf("RenameApplication() error: %v", err)
+	}
+	renamed, _ := s.GetApplication(ctx(), app.ID)
+	if renamed.Name != "MY APPLICATION" {
+		t.Errorf("name = %q, want the new capitalisation", renamed.Name)
+	}
+}
+
+func TestRenameApplicationRejectsABlankName(t *testing.T) {
+	s := openTemp(t)
+	app, _ := createApp(t, s, "App")
+
+	if err := s.RenameApplication(ctx(), app.ID, "   "); !errors.Is(err, ErrValidation) {
+		t.Errorf("error = %v, want a validation error", err)
+	}
+}
+
+func TestRenameApplicationReportsAnUnknownApplication(t *testing.T) {
+	s := openTemp(t)
+	if err := s.RenameApplication(ctx(), 4242, "Whatever"); !errors.Is(err, ErrNotFound) {
+		t.Errorf("error = %v, want ErrNotFound", err)
+	}
+}
+
+func TestNameIsAvailable(t *testing.T) {
+	s := openTemp(t)
+	app, _ := createApp(t, s, "Taken")
+
+	for _, tc := range []struct {
+		name    string
+		exclude int64
+		want    bool
+	}{
+		{"Taken", 0, false},
+		{"  taken ", 0, false},
+		{"Free", 0, true},
+		{"Taken", app.ID, true}, // its own name, when it is the one being renamed
+		{"   ", 0, false},
+	} {
+		got, err := s.NameIsAvailable(ctx(), tc.name, tc.exclude)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got != tc.want {
+			t.Errorf("NameIsAvailable(%q, exclude=%d) = %v, want %v", tc.name, tc.exclude, got, tc.want)
+		}
+	}
+}

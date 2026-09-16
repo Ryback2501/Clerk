@@ -32,18 +32,24 @@ export async function openApplication(page: Page, id: string): Promise<Locator> 
   await applicationList(page);
   const card = applicationCard(page, id);
   if (!(await card.evaluate((details: HTMLDetailsElement) => details.open))) {
-    await card.locator("summary").click();
+    await cardSummary(card).click();
   }
   await expect(card.locator(".panel")).toBeVisible();
   return card;
+}
+
+/** The dialog that shows a client secret once. */
+export function secretDialog(page: Page): Locator {
+  return page.locator("dialog[data-secret]");
 }
 
 /**
  * Registers an application through the admin UI, adds a redirect URI to it,
  * and returns its credentials.
  *
- * The client secret is shown exactly once, in the unfolded card that follows
- * creation, so it is read there before anything else can replace it.
+ * The client secret is shown exactly once, in a dialog that appears with the
+ * new application, so it is read and dismissed there — nothing can retrieve it
+ * afterwards.
  */
 export async function registerApplication(
   page: Page,
@@ -67,10 +73,14 @@ export async function registerApplication(
 
   const card = applicationCard(page, id);
   await expect(card).toHaveJSProperty("open", true);
-  await expect(card.getByText("Copy it now")).toBeVisible();
+
+  const secret = secretDialog(page);
+  await expect(secret).toBeVisible();
+  const clientSecret = (await secret.locator("code.secret").innerText()).trim();
+  await secret.getByRole("button", { name: "OK", exact: true }).click();
+  await expect(secret).toHaveCount(0);
 
   const clientId = (await card.locator(".credentials code.value").first().innerText()).trim();
-  const clientSecret = (await card.locator("code.secret").innerText()).trim();
 
   await addRedirectUri(page, id, redirectUri);
   return { clientId, clientSecret, id };
@@ -97,5 +107,10 @@ export async function addUser(page: Page, id: string, username: string) {
  * else can never be mistaken for it.
  */
 export function panelAlert(card: Locator): Locator {
-  return card.locator('.panel [role="alert"]');
+  return card.locator('.panel > section .alert[role="alert"]');
+}
+
+/** An application's own summary row, not the danger zone's. */
+export function cardSummary(card: Locator): Locator {
+  return card.locator("> summary");
 }

@@ -1,18 +1,19 @@
 {{define "panel" -}}
-<div class="panel" data-user-count="{{len .Users}}">
+<div class="panel" data-user-count="{{len .Users}}" data-app-name="{{.App.Name}}">
+
+  <section class="panel-section name-section">
+    <div class="name-row">
+      <div>
+        <h5 class="section-title">Name</h5>
+        <p class="name-value">{{.App.Name}}</p>
+      </div>
+      <button type="button" class="btn btn-sm btn-inverse-primary"
+              commandfor="rename-{{.App.ID}}" command="show-modal">Rename</button>
+    </div>
+  </section>
 
   <section class="panel-section">
     <h5 class="section-title">Credentials</h5>
-    {{if .RevealedSecret}}
-    <div class="alert alert-success secret-alert" role="status">
-      <p class="alert-heading">Client secret</p>
-      <p><code class="value secret">{{.RevealedSecret}}</code></p>
-      <p class="small">
-        <strong>Copy it now.</strong> Only a hash is stored, so this secret cannot be shown
-        again. If you lose it, regenerate a new one — you do not need to recreate the application.
-      </p>
-    </div>
-    {{end}}
     <dl class="credentials">
       <dt>Client ID</dt>
       <dd><code class="value">{{.App.ClientID}}</code></dd>
@@ -21,11 +22,11 @@
       <dt>Registered</dt>
       <dd class="text-muted">{{.App.CreatedAt}}</dd>
     </dl>
-    <form method="post" action="/admin/applications/{{.App.ID}}/secret" class="action-row">
-      <input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
-      <button type="submit" class="btn btn-sm btn-inverse-primary">Regenerate client secret</button>
+    <div class="action-row">
+      <button type="button" class="btn btn-sm btn-inverse-primary"
+              commandfor="regenerate-{{.App.ID}}" command="show-modal">Regenerate client secret</button>
       <small class="form-text">The current secret stops working immediately.</small>
-    </form>
+    </div>
   </section>
 
   <section class="panel-section">
@@ -53,7 +54,7 @@
     {{else}}
     <p class="alert alert-warning">No redirect URIs registered. Authorization requests will be rejected until you add one.</p>
     {{end}}
-    <form method="post" action="/admin/applications/{{.App.ID}}/redirect-uris" class="add-form">
+    <form method="post" action="/admin/applications/{{.App.ID}}/redirect-uris" class="add-form" data-keep-focus="uri">
       <input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
       {{if .URIError}}<p class="alert alert-danger" role="alert">{{.URIError}}</p>{{end}}
       <div class="form-group">
@@ -103,7 +104,7 @@
     {{else}}
     <p class="alert alert-warning">No test users yet. Authorization requests for this application will show an error until you add at least one.</p>
     {{end}}
-    <form method="post" action="/admin/applications/{{.App.ID}}/users" class="add-form">
+    <form method="post" action="/admin/applications/{{.App.ID}}/users" class="add-form" data-keep-focus="username">
       <input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
       {{if .UserError}}<p class="alert alert-danger" role="alert">{{.UserError}}</p>{{end}}
       <div class="form-group">
@@ -118,8 +119,10 @@
     </form>
   </section>
 
-  <section class="panel-section danger-zone">
-    <h5 class="section-title">Danger zone</h5>
+  <details class="panel-section danger-zone">
+    <summary class="section-title danger-summary">
+      <span class="app-chevron" aria-hidden="true"></span>Danger zone
+    </summary>
     <div class="danger-row">
       <div>
         <p class="danger-heading">Delete this application</p>
@@ -127,7 +130,28 @@
       </div>
       <button type="button" class="btn btn-inverse-danger" commandfor="delete-{{.App.ID}}" command="show-modal">Delete application</button>
     </div>
-  </section>
+  </details>
+
+  <dialog id="rename-{{.App.ID}}" class="modal" aria-labelledby="rename-{{.App.ID}}-title">
+    {{template "name-form" .RenameForm}}
+  </dialog>
+
+  <dialog id="regenerate-{{.App.ID}}" class="modal" aria-labelledby="regenerate-{{.App.ID}}-title">
+    <form method="post" action="/admin/applications/{{.App.ID}}/secret" class="modal-form">
+      <input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
+      <header class="modal-header">
+        <p class="modal-title" id="regenerate-{{.App.ID}}-title">Regenerate the client secret?</p>
+      </header>
+      <div class="modal-body">
+        <p>The current secret stops working immediately, and any client still configured with it will be refused.</p>
+        <p>The new secret is shown once, right after this.</p>
+      </div>
+      <footer class="modal-footer">
+        <button type="button" class="btn btn-inverse-secondary" commandfor="regenerate-{{.App.ID}}" command="close">Cancel</button>
+        <button type="submit" class="btn btn-inverse-primary">OK</button>
+      </footer>
+    </form>
+  </dialog>
 
   <dialog id="delete-{{.App.ID}}" class="modal" aria-labelledby="delete-title-{{.App.ID}}">
     <form method="post" action="/admin/applications/{{.App.ID}}/delete" class="modal-form" data-delete>
@@ -151,4 +175,5 @@
   </dialog>
 
 </div>
+{{if .RevealedSecret}}{{template "secret-dialog" .}}{{end}}
 {{- end}}
