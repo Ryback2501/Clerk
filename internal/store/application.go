@@ -365,6 +365,53 @@ func (s *Store) RemoveRedirectURI(ctx context.Context, appID int64, uri string) 
 	return expectOneRow(res, "redirect uri")
 }
 
+// UpdateRedirectURI replaces one of a client's registered redirect URIs,
+// leaving the others as they are. Correcting a typo this way keeps the rest of
+// the registration intact.
+func (s *Store) UpdateRedirectURI(ctx context.Context, appID int64, original, replacement string) error {
+	// The row has to exist before its value is worth judging: editing one that
+	// somebody else has already removed is "not found", not "invalid".
+	var exists bool
+	if err := s.db.QueryRowContext(ctx,
+		`SELECT EXISTS (SELECT 1 FROM redirect_uris WHERE application_id = ? AND uri = ?)`,
+		appID, original).Scan(&exists); err != nil {
+		return fmt.Errorf("load redirect uri: %w", err)
+	}
+	if !exists {
+		return ErrNotFound
+	}
+
+	replacement = strings.TrimSpace(replacement)
+	if err := ValidateRedirectURI(replacement); err != nil {
+		return err
+	}
+
+	res, err := s.db.ExecContext(ctx,
+		`UPDATE redirect_uris SET uri = ? WHERE application_id = ? AND uri = ?`,
+		replacement, appID, original)
+	if err != nil {
+		// Rewriting a URI to one the application already has is the
+		// administrator's mistake to see, not a fault.
+		if isDuplicateRedirectURI(err) {
+			return invalidf("redirect uri %q is already registered for this application", replacement)
+		}
+		return fmt.Errorf("update redirect uri: %w", err)
+	}
+	return expectOneRow(res, "redirect uri")
+}
+
+// isDuplicateRedirectURI reports whether err is the per-application uniqueness
+// failure, as opposed to any other constraint. The driver exports no typed
+// error, so the message naming the columns is the only signal available.
+func isDuplicateRedirectURI(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "unique constraint failed") &&
+		strings.Contains(msg, "redirect_uris.uri")
+}
+
 // DeleteApplication removes a client and, by cascade, every user and redirect
 // URI belonging to it.
 func (s *Store) DeleteApplication(ctx context.Context, appID int64) error {

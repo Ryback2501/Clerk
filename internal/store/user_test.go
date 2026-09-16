@@ -308,3 +308,92 @@ func TestUniqueViolationsAreAttributedToTheRightConstraint(t *testing.T) {
 		})
 	}
 }
+
+// Renaming is the alternative to deleting and re-adding, which would issue a
+// new sub — the very identifier a client has already stored.
+func TestRenameUserKeepsItsSubject(t *testing.T) {
+	s := openTemp(t)
+	app, _ := createApp(t, s, "App")
+	user, err := s.CreateUser(ctx(), app.ID, "david")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := s.RenameUser(ctx(), user.ID, "  David Jones  "); err != nil {
+		t.Fatalf("RenameUser() error: %v", err)
+	}
+
+	renamed, err := s.GetUser(ctx(), user.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if renamed.Username != "David Jones" {
+		t.Errorf("username = %q, want the trimmed new name", renamed.Username)
+	}
+	if renamed.Sub != user.Sub {
+		t.Errorf("sub changed from %q to %q; a client would no longer recognise this identity", user.Sub, renamed.Sub)
+	}
+	if renamed.ApplicationID != app.ID {
+		t.Error("the user moved to another application")
+	}
+}
+
+func TestRenameUserRejectsANameTakenInTheSameApplication(t *testing.T) {
+	s := openTemp(t)
+	app, _ := createApp(t, s, "App")
+	first, _ := s.CreateUser(ctx(), app.ID, "david")
+	if _, err := s.CreateUser(ctx(), app.ID, "alice"); err != nil {
+		t.Fatal(err)
+	}
+
+	err := s.RenameUser(ctx(), first.ID, "alice")
+	if !errors.Is(err, ErrValidation) {
+		t.Fatalf("error = %v, want a validation error", err)
+	}
+	if !strings.Contains(err.Error(), "already exists") {
+		t.Errorf("error = %v, want it to explain the conflict", err)
+	}
+
+	unchanged, _ := s.GetUser(ctx(), first.ID)
+	if unchanged.Username != "david" {
+		t.Errorf("username = %q, want it unchanged", unchanged.Username)
+	}
+}
+
+// The same name in another application is a different identity, and a user
+// never collides with itself.
+func TestRenameUserAcceptsItsOwnNameAndNamesUsedElsewhere(t *testing.T) {
+	s := openTemp(t)
+	app, _ := createApp(t, s, "App")
+	other, _ := createApp(t, s, "Other")
+	user, _ := s.CreateUser(ctx(), app.ID, "david")
+	if _, err := s.CreateUser(ctx(), other.ID, "alice"); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := s.RenameUser(ctx(), user.ID, "david"); err != nil {
+		t.Errorf("renaming a user to its own name failed: %v", err)
+	}
+	if err := s.RenameUser(ctx(), user.ID, "alice"); err != nil {
+		t.Errorf("a name used in another application was refused: %v", err)
+	}
+}
+
+func TestRenameUserRejectsAnInvalidName(t *testing.T) {
+	s := openTemp(t)
+	app, _ := createApp(t, s, "App")
+	user, _ := s.CreateUser(ctx(), app.ID, "david")
+
+	for _, name := range []string{"", "   ", "bad\x07name"} {
+		if err := s.RenameUser(ctx(), user.ID, name); !errors.Is(err, ErrValidation) {
+			t.Errorf("RenameUser(%q) error = %v, want a validation error", name, err)
+		}
+	}
+}
+
+func TestRenameUserReportsAnUnknownUser(t *testing.T) {
+	s := openTemp(t)
+	if err := s.RenameUser(ctx(), 4242, "david"); !errors.Is(err, ErrNotFound) {
+		t.Errorf("error = %v, want ErrNotFound", err)
+	}
+}

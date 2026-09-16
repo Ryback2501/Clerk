@@ -54,6 +54,36 @@ type nameForm struct {
 	Error string
 }
 
+func editURIForm(token string, appID int64, index int, uri string) rowForm {
+	return rowForm{
+		Title:       "Edit redirect URI",
+		Action:      "/admin/applications/" + strconv.FormatInt(appID, 10) + "/redirect-uris/edit",
+		Submit:      "Save",
+		DialogID:    "edit-uri-" + strconv.FormatInt(appID, 10) + "-" + strconv.Itoa(index),
+		CSRFToken:   token,
+		Label:       "Redirect URI",
+		Field:       "uri",
+		Value:       uri,
+		Original:    uri,
+		Placeholder: "https://app.example.com/callback",
+	}
+}
+
+func renameUserForm(token string, appID int64, user *store.User) rowForm {
+	return rowForm{
+		Title:       "Rename test user",
+		Action:      "/admin/applications/" + strconv.FormatInt(appID, 10) + "/users/" + strconv.FormatInt(user.ID, 10) + "/name",
+		Submit:      "Save",
+		DialogID:    "rename-user-" + strconv.FormatInt(user.ID, 10),
+		CSRFToken:   token,
+		Label:       "User name",
+		Field:       "username",
+		Value:       user.Username,
+		Original:    user.Username,
+		Placeholder: "John Doe",
+	}
+}
+
 func registerForm(token string) nameForm {
 	return nameForm{
 		Title:     "Register an application",
@@ -87,11 +117,48 @@ type appSummary struct {
 	UserCount int
 }
 
+// rowForm is the dialog that edits one row: a redirect URI or a test user.
+// Both work like the name dialog — the same message slot, and a button that
+// stays disabled while the value is empty, unchanged or already taken.
+type rowForm struct {
+	Title     string
+	Action    string
+	Submit    string
+	DialogID  string
+	CSRFToken string
+
+	// Label names the field; Field is its form name ("uri" or "username"),
+	// which is also what the browser's duplicate check compares against.
+	Label string
+	Field string
+
+	Value       string
+	Original    string
+	Placeholder string
+	Error       string
+}
+
+// uriRow is one registered redirect URI, with the dialogs that edit and remove
+// it. The index only has to be unique within the panel.
+type uriRow struct {
+	Index int
+	URI   string
+	Form  rowForm
+}
+
+// userRow is one test identity, with the dialog that renames it.
+type userRow struct {
+	*store.User
+	Form rowForm
+}
+
 // panelData is everything an unfolded application shows.
 type panelData struct {
 	CSRFToken string
 	App       *store.Application
 	Users     []*store.User
+	URIRows   []uriRow
+	UserRows  []userRow
 
 	// RenameForm is the dialog that renames this application.
 	RenameForm nameForm
@@ -270,6 +337,46 @@ func (h *Handler) addRedirectURI(w http.ResponseWriter, r *http.Request, admin *
 	h.renderPanel(w, r, admin, app.ID, http.StatusOK, panelData{})
 }
 
+// editRedirectURI replaces one registered URI, so a typo can be corrected
+// without the round trip of removing and adding.
+func (h *Handler) editRedirectURI(w http.ResponseWriter, r *http.Request, admin *adminauth.Admin) {
+	app, ok := h.lookupApplication(w, r, admin)
+	if !ok {
+		return
+	}
+
+	original := r.PostFormValue("original")
+	typed := strings.TrimSpace(r.PostFormValue("uri"))
+	if err := h.store.UpdateRedirectURI(r.Context(), app.ID, original, typed); err != nil {
+		switch {
+		case errors.Is(err, store.ErrValidation):
+			// The dialog stays open, carrying the reason and what was typed.
+			form := editURIForm(h.csrf.Issue(w, r), app.ID, h.uriIndex(app, original), original)
+			form.Value = typed
+			form.Error = validationMessage(err)
+			h.renderFragment(w, r, "row-form", http.StatusUnprocessableEntity, form)
+		case errors.Is(err, store.ErrNotFound):
+			h.notFound(w, r, admin)
+		default:
+			h.internalError(w, r, admin, "update redirect uri", err)
+		}
+		return
+	}
+	h.renderPanel(w, r, admin, app.ID, http.StatusOK, panelData{})
+}
+
+// uriIndex finds the position a URI is rendered at, so a rejected edit returns
+// to the dialog it came from. A URI that is no longer registered cannot reach
+// this: the store reports that as not found.
+func (h *Handler) uriIndex(app *store.Application, uri string) int {
+	for i, registered := range app.RedirectURIs {
+		if registered == uri {
+			return i + 1
+		}
+	}
+	return 0
+}
+
 func (h *Handler) removeRedirectURI(w http.ResponseWriter, r *http.Request, admin *adminauth.Admin) {
 	app, ok := h.lookupApplication(w, r, admin)
 	if !ok {
@@ -336,6 +443,21 @@ func (h *Handler) renderPanel(w http.ResponseWriter, r *http.Request, admin *adm
 	data.App = app
 	data.Users = users
 	data.RenameForm = renameForm(data.CSRFToken, app)
+
+	for i, uri := range app.RedirectURIs {
+		index := i + 1
+		data.URIRows = append(data.URIRows, uriRow{
+			Index: index,
+			URI:   uri,
+			Form:  editURIForm(data.CSRFToken, app.ID, index, uri),
+		})
+	}
+	for _, user := range users {
+		data.UserRows = append(data.UserRows, userRow{
+			User: user,
+			Form: renameUserForm(data.CSRFToken, app.ID, user),
+		})
+	}
 	h.renderFragment(w, r, "panel", status, data)
 }
 

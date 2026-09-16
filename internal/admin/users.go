@@ -36,33 +36,39 @@ func (h *Handler) createUser(w http.ResponseWriter, r *http.Request, admin *admi
 	h.renderPanel(w, r, admin, app.ID, http.StatusOK, panelData{})
 }
 
-func (h *Handler) deleteUser(w http.ResponseWriter, r *http.Request, admin *adminauth.Admin) {
-	app, ok := h.lookupApplication(w, r, admin)
+// renameUser changes a test identity's name. Its sub is deliberately untouched:
+// a client has already stored it.
+func (h *Handler) renameUser(w http.ResponseWriter, r *http.Request, admin *adminauth.Admin) {
+	app, user, ok := h.lookupUser(w, r, admin)
 	if !ok {
 		return
 	}
 
-	userID, err := strconv.ParseInt(r.PathValue("userID"), 10, 64)
-	if err != nil {
-		h.notFound(w, r, admin)
+	typed := strings.TrimSpace(r.PostFormValue("username"))
+	if err := h.store.RenameUser(r.Context(), user.ID, typed); err != nil {
+		switch {
+		case errors.Is(err, store.ErrValidation):
+			form := renameUserForm(h.csrf.Issue(w, r), app.ID, user)
+			form.Value = typed
+			form.Error = validationMessage(err)
+			h.renderFragment(w, r, "row-form", http.StatusUnprocessableEntity, form)
+		case errors.Is(err, store.ErrNotFound):
+			h.notFound(w, r, admin)
+		default:
+			h.internalError(w, r, admin, "rename user", err)
+		}
 		return
 	}
 
-	user, err := h.store.GetUser(r.Context(), userID)
-	if errors.Is(err, store.ErrNotFound) {
-		h.notFound(w, r, admin)
-		return
-	}
-	if err != nil {
-		h.internalError(w, r, admin, "load user", err)
-		return
-	}
+	h.logger.InfoContext(r.Context(), "test user renamed",
+		"application_id", app.ID, "user_id", user.ID, "sub", user.Sub, "admin", admin.Subject)
 
-	// A user may only be removed through the application that owns them.
-	// Without this check, the id in the URL alone would be enough to delete
-	// another application's identity.
-	if user.ApplicationID != app.ID {
-		h.notFound(w, r, admin)
+	h.renderPanel(w, r, admin, app.ID, http.StatusOK, panelData{})
+}
+
+func (h *Handler) deleteUser(w http.ResponseWriter, r *http.Request, admin *adminauth.Admin) {
+	app, user, ok := h.lookupUser(w, r, admin)
+	if !ok {
 		return
 	}
 
@@ -75,4 +81,37 @@ func (h *Handler) deleteUser(w http.ResponseWriter, r *http.Request, admin *admi
 		"application_id", app.ID, "user_id", user.ID, "sub", user.Sub, "admin", admin.Subject)
 
 	h.renderPanel(w, r, admin, app.ID, http.StatusOK, panelData{})
+}
+
+// lookupUser resolves the {id} and {userID} path segments together.
+//
+// A user may only be reached through the application that owns them. Without
+// that check, the id in the URL alone would be enough to rename or delete
+// another application's identity.
+func (h *Handler) lookupUser(w http.ResponseWriter, r *http.Request, admin *adminauth.Admin) (*store.Application, *store.User, bool) {
+	app, ok := h.lookupApplication(w, r, admin)
+	if !ok {
+		return nil, nil, false
+	}
+
+	userID, err := strconv.ParseInt(r.PathValue("userID"), 10, 64)
+	if err != nil {
+		h.notFound(w, r, admin)
+		return nil, nil, false
+	}
+
+	user, err := h.store.GetUser(r.Context(), userID)
+	if errors.Is(err, store.ErrNotFound) {
+		h.notFound(w, r, admin)
+		return nil, nil, false
+	}
+	if err != nil {
+		h.internalError(w, r, admin, "load user", err)
+		return nil, nil, false
+	}
+	if user.ApplicationID != app.ID {
+		h.notFound(w, r, admin)
+		return nil, nil, false
+	}
+	return app, user, true
 }

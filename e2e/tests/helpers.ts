@@ -103,11 +103,18 @@ export async function addUser(page: Page, id: string, username: string) {
 }
 
 /**
- * The validation error inside one application's panel, so an alert anywhere
- * else can never be mistaken for it.
+ * The message under a field in one application's panel, so a message somewhere
+ * else — in a dialog, say — can never be mistaken for it.
  */
-export function panelAlert(card: Locator): Locator {
-  return card.locator('.panel > section .alert[role="alert"]');
+export function fieldMessage(card: Locator, field: "uri" | "username"): Locator {
+  return card.locator(`.panel form.add-form[data-check="${field}"] .field-message`);
+}
+
+/** Reveals a row's controls the way a pointer does, then returns the row. */
+export async function hoverRow(card: Locator, name: RegExp): Promise<Locator> {
+  const row = card.getByRole("row", { name });
+  await row.hover();
+  return row;
 }
 
 /** An application's own summary row, not the danger zone's. */

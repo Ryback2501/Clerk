@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"errors"
+	"slices"
 	"strings"
 	"testing"
 
@@ -501,5 +502,78 @@ func TestNameIsAvailable(t *testing.T) {
 		if got != tc.want {
 			t.Errorf("NameIsAvailable(%q, exclude=%d) = %v, want %v", tc.name, tc.exclude, got, tc.want)
 		}
+	}
+}
+
+func TestUpdateRedirectURI(t *testing.T) {
+	s := openTemp(t)
+	app, _ := createApp(t, s, "App", "https://a.example.com/cb", "https://b.example.com/cb")
+
+	if err := s.UpdateRedirectURI(ctx(), app.ID, "https://a.example.com/cb", " https://new.example.com/cb "); err != nil {
+		t.Fatalf("UpdateRedirectURI() error: %v", err)
+	}
+
+	updated, _ := s.GetApplication(ctx(), app.ID)
+	want := []string{"https://b.example.com/cb", "https://new.example.com/cb"}
+	if len(updated.RedirectURIs) != len(want) {
+		t.Fatalf("redirect URIs = %v, want %v", updated.RedirectURIs, want)
+	}
+	for _, uri := range want {
+		if !slices.Contains(updated.RedirectURIs, uri) {
+			t.Errorf("redirect URIs = %v, want them to contain %q", updated.RedirectURIs, uri)
+		}
+	}
+}
+
+func TestUpdateRedirectURIRejectsBadAndDuplicateValues(t *testing.T) {
+	s := openTemp(t)
+	app, _ := createApp(t, s, "App", "https://a.example.com/cb", "https://b.example.com/cb")
+
+	for _, tc := range []struct{ name, to, want string }{
+		{"not a url", "not-a-url", "absolute"},
+		{"javascript", "javascript:alert(1)", "redirect"},
+		{"already registered", "https://b.example.com/cb", "already"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			err := s.UpdateRedirectURI(ctx(), app.ID, "https://a.example.com/cb", tc.to)
+			if !errors.Is(err, ErrValidation) {
+				t.Fatalf("error = %v, want a validation error", err)
+			}
+			if !strings.Contains(strings.ToLower(err.Error()), tc.want) {
+				t.Errorf("error = %v, want it to mention %q", err, tc.want)
+			}
+		})
+	}
+
+	// Leaving a URI as it is changes nothing and is not a conflict.
+	if err := s.UpdateRedirectURI(ctx(), app.ID, "https://a.example.com/cb", "https://a.example.com/cb"); err != nil {
+		t.Errorf("rewriting a URI to itself failed: %v", err)
+	}
+
+	app, _ = s.GetApplication(ctx(), app.ID)
+	if len(app.RedirectURIs) != 2 {
+		t.Errorf("redirect URIs = %v, want the original two", app.RedirectURIs)
+	}
+}
+
+func TestUpdateRedirectURIReportsAnUnknownOriginal(t *testing.T) {
+	s := openTemp(t)
+	app, _ := createApp(t, s, "App", "https://a.example.com/cb")
+
+	// A URI that is already gone is reported as gone whatever it would have
+	// been changed to: the row the caller is editing no longer exists, and
+	// answering "that value is invalid" would send them correcting the wrong
+	// thing.
+	for _, replacement := range []string{"https://new.example.com/cb", "not-a-url"} {
+		err := s.UpdateRedirectURI(ctx(), app.ID, "https://gone.example.com/cb", replacement)
+		if !errors.Is(err, ErrNotFound) {
+			t.Errorf("UpdateRedirectURI(to %q) error = %v, want ErrNotFound", replacement, err)
+		}
+	}
+
+	// Nor may one application edit another's.
+	other, _ := createApp(t, s, "Other", "https://b.example.com/cb")
+	if err := s.UpdateRedirectURI(ctx(), other.ID, "https://a.example.com/cb", "https://c.example.com/cb"); !errors.Is(err, ErrNotFound) {
+		t.Errorf("error = %v, want ErrNotFound", err)
 	}
 }

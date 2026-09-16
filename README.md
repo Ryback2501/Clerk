@@ -154,6 +154,11 @@ credentials, redirect URIs, test users and a danger zone.
 **Rename**, at the top of an unfolded application, changes only its label: the client ID,
 secret, redirect URIs and users stay as they are.
 
+Each redirect URI and test user can be corrected in place — the controls appear on the row
+you point at — and removing one asks first. Renaming a test user **keeps its `sub`**, so a
+client that already knows that identity still recognises it; deleting the user and adding
+the name again would issue a new one.
+
 ### 2. Configure the client
 
 Most OIDC libraries need only these settings:

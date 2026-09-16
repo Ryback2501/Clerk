@@ -31,20 +31,21 @@
 
   <section class="panel-section">
     <h5 class="section-title">Redirect URIs</h5>
-    {{if .App.RedirectURIs}}
+    {{if .URIRows}}
     <div class="table-responsive">
       <table class="table table-hover">
         <thead><tr><th scope="col">URI</th><th scope="col" class="col-action"><span class="sr-only">Actions</span></th></tr></thead>
         <tbody>
-        {{range .App.RedirectURIs}}
-          <tr>
-            <td><code class="value">{{.}}</code></td>
+        {{range .URIRows}}
+          <tr data-taken-uri="{{.URI}}">
+            <td><code class="value">{{.URI}}</code></td>
             <td class="col-action">
-              <form method="post" action="/admin/applications/{{$.App.ID}}/redirect-uris/remove">
-                <input type="hidden" name="csrf_token" value="{{$.CSRFToken}}">
-                <input type="hidden" name="uri" value="{{.}}">
-                <button type="submit" class="btn btn-sm btn-inverse-danger">Remove</button>
-              </form>
+              <div class="row-actions">
+                <button type="button" class="btn btn-sm btn-inverse-primary row-action"
+                        commandfor="{{.Form.DialogID}}" command="show-modal">Edit</button>
+                <button type="button" class="btn btn-sm btn-inverse-danger row-action"
+                        commandfor="remove-uri-{{$.App.ID}}-{{.Index}}" command="show-modal">Remove</button>
+              </div>
             </td>
           </tr>
         {{end}}
@@ -54,17 +55,19 @@
     {{else}}
     <p class="alert alert-warning">No redirect URIs registered. Authorization requests will be rejected until you add one.</p>
     {{end}}
-    <form method="post" action="/admin/applications/{{.App.ID}}/redirect-uris" class="add-form" data-keep-focus="uri">
+    <form method="post" action="/admin/applications/{{.App.ID}}/redirect-uris" class="add-form"
+          data-keep-focus="uri" data-check="uri">
       <input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
-      {{if .URIError}}<p class="alert alert-danger" role="alert">{{.URIError}}</p>{{end}}
       <div class="form-group">
         <label for="uri-{{.App.ID}}">Add a redirect URI</label>
         <div class="input-row">
           <input id="uri-{{.App.ID}}" class="form-control{{if .URIError}} is-invalid{{end}}" type="text" inputmode="url"
                  name="uri" value="{{.URIForm}}" required autocomplete="off" placeholder="https://app.example.com/callback">
-          <button type="submit" class="btn btn-inverse-primary">Add redirect URI</button>
+          <button type="submit" class="btn btn-inverse-primary" data-submit>Add redirect URI</button>
         </div>
-        <small class="form-text">Matched exactly at authorization time — no wildcards, no prefixes.</small>
+        <!-- The hint gives way to the reason the value cannot be added. -->
+        <small class="form-text" data-form-hint {{if .URIError}}hidden{{end}}>Matched exactly at authorization time — no wildcards, no prefixes.</small>
+        <p class="field-message" data-field-message role="alert">{{.URIError}}</p>
       </div>
     </form>
   </section>
@@ -75,7 +78,7 @@
       The identities the login page offers for this application. There are no passwords:
       signing in means picking one and pressing Login.
     </p>
-    {{if .Users}}
+    {{if .UserRows}}
     <div class="table-responsive">
       <table class="table table-hover">
         <thead>
@@ -86,15 +89,17 @@
           </tr>
         </thead>
         <tbody>
-        {{range .Users}}
-          <tr>
+        {{range .UserRows}}
+          <tr data-taken-username="{{.Username}}">
             <td>{{.Username}}</td>
             <td><code class="value">{{.Sub}}</code></td>
             <td class="col-action">
-              <form method="post" action="/admin/applications/{{$.App.ID}}/users/{{.ID}}/delete">
-                <input type="hidden" name="csrf_token" value="{{$.CSRFToken}}">
-                <button type="submit" class="btn btn-sm btn-inverse-danger">Delete</button>
-              </form>
+              <div class="row-actions">
+                <button type="button" class="btn btn-sm btn-inverse-primary row-action"
+                        commandfor="{{.Form.DialogID}}" command="show-modal">Rename</button>
+                <button type="button" class="btn btn-sm btn-inverse-danger row-action"
+                        commandfor="delete-user-{{.ID}}" command="show-modal">Delete</button>
+              </div>
             </td>
           </tr>
         {{end}}
@@ -104,17 +109,17 @@
     {{else}}
     <p class="alert alert-warning">No test users yet. Authorization requests for this application will show an error until you add at least one.</p>
     {{end}}
-    <form method="post" action="/admin/applications/{{.App.ID}}/users" class="add-form" data-keep-focus="username">
+    <form method="post" action="/admin/applications/{{.App.ID}}/users" class="add-form"
+          data-keep-focus="username" data-check="username">
       <input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
-      {{if .UserError}}<p class="alert alert-danger" role="alert">{{.UserError}}</p>{{end}}
       <div class="form-group">
         <label for="user-{{.App.ID}}">Add a test user</label>
         <div class="input-row">
           <input id="user-{{.App.ID}}" class="form-control{{if .UserError}} is-invalid{{end}}" type="text"
-                 name="username" value="{{.UserForm}}" required autocomplete="off" placeholder="david">
-          <button type="submit" class="btn btn-inverse-primary">Add user</button>
+                 name="username" value="{{.UserForm}}" required autocomplete="off" placeholder="John Doe">
+          <button type="submit" class="btn btn-inverse-primary" data-submit>Add user</button>
         </div>
-        <small class="form-text">Unique within this application. The same name in another application is a different identity.</small>
+        <p class="field-message" data-field-message role="alert">{{.UserError}}</p>
       </div>
     </form>
   </section>
@@ -131,6 +136,47 @@
       <button type="button" class="btn btn-inverse-danger" commandfor="delete-{{.App.ID}}" command="show-modal">Delete application</button>
     </div>
   </details>
+
+  {{range .URIRows}}
+  {{template "row-dialog" .Form}}
+  <dialog id="remove-uri-{{$.App.ID}}-{{.Index}}" class="modal" aria-labelledby="remove-uri-{{$.App.ID}}-{{.Index}}-title">
+    <form method="post" action="/admin/applications/{{$.App.ID}}/redirect-uris/remove" class="modal-form">
+      <input type="hidden" name="csrf_token" value="{{$.CSRFToken}}">
+      <input type="hidden" name="uri" value="{{.URI}}">
+      <header class="modal-header">
+        <p class="modal-title" id="remove-uri-{{$.App.ID}}-{{.Index}}-title">Remove this redirect URI?</p>
+      </header>
+      <div class="modal-body">
+        <p><code class="value">{{.URI}}</code></p>
+        <p>Authorization requests sent to it will be refused from then on.</p>
+      </div>
+      <footer class="modal-footer">
+        <button type="button" class="btn btn-inverse-secondary" commandfor="remove-uri-{{$.App.ID}}-{{.Index}}" command="close">Cancel</button>
+        <button type="submit" class="btn btn-inverse-danger">Remove</button>
+      </footer>
+    </form>
+  </dialog>
+  {{end}}
+
+  {{range .UserRows}}
+  {{template "row-dialog" .Form}}
+  <dialog id="delete-user-{{.ID}}" class="modal" aria-labelledby="delete-user-{{.ID}}-title">
+    <form method="post" action="/admin/applications/{{$.App.ID}}/users/{{.ID}}/delete" class="modal-form">
+      <input type="hidden" name="csrf_token" value="{{$.CSRFToken}}">
+      <header class="modal-header">
+        <p class="modal-title" id="delete-user-{{.ID}}-title">Delete this test user?</p>
+      </header>
+      <div class="modal-body">
+        <p><strong>{{.Username}}</strong></p>
+        <p>Their subject identifier is retired with them: adding the name again creates a different identity.</p>
+      </div>
+      <footer class="modal-footer">
+        <button type="button" class="btn btn-inverse-secondary" commandfor="delete-user-{{.ID}}" command="close">Cancel</button>
+        <button type="submit" class="btn btn-inverse-danger">Delete</button>
+      </footer>
+    </form>
+  </dialog>
+  {{end}}
 
   <dialog id="rename-{{.App.ID}}" class="modal" aria-labelledby="rename-{{.App.ID}}-title">
     {{template "name-form" .RenameForm}}
