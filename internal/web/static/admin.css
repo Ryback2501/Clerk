@@ -347,7 +347,11 @@ code.value { word-break: break-all; user-select: all; }
 
 /* ---- Application list ---------------------------------------------------- */
 
-.app-list { display: grid; gap: 1rem; }
+/* The cards sit flush against each other, sharing one border between them. */
+.app-list { display: grid; gap: 0; }
+.app + .app, .app + .empty-state { border-top: 0; }
+.app:not(:first-child), .empty-state:not(:first-child) { border-top-left-radius: 0; border-top-right-radius: 0; }
+.app:not(:last-child) { border-bottom-left-radius: 0; border-bottom-right-radius: 0; }
 
 .app { overflow: hidden; }
 .app[open] { box-shadow: var(--shadow); }
@@ -417,8 +421,29 @@ code.value { word-break: break-all; user-select: all; }
   .credentials dd { margin-bottom: 0.5rem; }
 }
 
+.name-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+}
+.name-value { margin: 0; font-size: 1.0625rem; font-weight: 700; overflow-wrap: anywhere; }
+
 .danger-zone { background: rgba(var(--danger-rgb), 0.04); }
 .danger-zone .section-title { color: var(--danger); }
+.danger-summary {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  margin: 0;
+  cursor: pointer;
+  list-style: none;
+}
+.danger-summary::-webkit-details-marker { display: none; }
+.danger-zone[open] .danger-summary { margin-bottom: 1rem; }
+.danger-summary .app-chevron { border-color: var(--danger); }
+.danger-zone[open] .danger-summary .app-chevron { transform: rotate(45deg); }
 .danger-row {
   display: flex;
   flex-wrap: wrap;
@@ -475,7 +500,8 @@ dialog.modal {
 dialog.modal::backdrop { background: var(--backdrop); }
 .modal-form { margin: 0; }
 .modal-header { padding: 1.35rem 1.5rem 0; }
-.modal-title { margin: 0; }
+/* A title is ordinary text in bold: no heading size, and nothing ruled off. */
+.modal-title { margin: 0; font-size: 1rem; font-weight: 700; }
 .modal-body { padding: 1rem 1.5rem; }
 .modal-body p:last-child { margin-bottom: 0; }
 .modal-footer {
@@ -483,7 +509,43 @@ dialog.modal::backdrop { background: var(--backdrop); }
   justify-content: flex-end;
   gap: 0.625rem;
   padding: 1rem 1.5rem 1.35rem;
-  border-top: 1px solid var(--border);
+}
+
+/* The message under the name box is always in the layout, so showing it cannot
+   change the dialog's size. */
+.field-message {
+  min-height: 1.25rem;
+  margin: 0.4rem 0 0;
+  font-size: 0.8125rem;
+  line-height: 1.25rem;
+  color: var(--danger);
+}
+
+/* ---- The one-time client secret ------------------------------------------ */
+
+.secret-value {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  width: 100%;
+  margin-top: 0.25rem;
+  padding: 0.75rem 1rem;
+  font: inherit;
+  text-align: left;
+  color: var(--text);
+  background: var(--surface-muted);
+  border: 1px solid var(--input-border);
+  border-radius: var(--radius);
+  cursor: pointer;
+}
+.secret-value:hover { border-color: var(--primary); }
+.secret-value .secret { flex: 1; font-size: 0.875rem; }
+.copy-icon { flex: none; width: 1.1rem; height: 1.1rem; color: var(--primary); }
+.secret-copied {
+  margin: 0.4rem 0 0;
+  font-size: 0.8125rem;
+  font-weight: 700;
+  color: var(--success);
 }
 
 /* ---- Sign-in ------------------------------------------------------------- */

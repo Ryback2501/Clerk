@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -268,5 +269,70 @@ func TestOpenHandlesPathsNeedingEscaping(t *testing.T) {
 				t.Error("foreign keys are off; the pragma list was lost in the DSN")
 			}
 		})
+	}
+}
+
+// An upgrade must not strand a database that predates unique names: two
+// applications could legitimately be called the same thing until then, and a
+// failed migration stops Clerk from starting at all.
+func TestUniqueNameMigrationReconcilesExistingDuplicates(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "clerk.db")
+	s, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Put the database back the way it looked before the unique-name migration,
+	// then fill it with rows that migration has to cope with.
+	for _, stmt := range []string{
+		`DROP INDEX idx_applications_name_unique`,
+		`DELETE FROM schema_migrations WHERE name = '0006_unique_application_name.sql'`,
+		`INSERT INTO applications (name, client_id, client_secret_hash) VALUES ('My App', 'c1', 'h')`,
+		`INSERT INTO applications (name, client_id, client_secret_hash) VALUES ('my app', 'c2', 'h')`,
+		`INSERT INTO applications (name, client_id, client_secret_hash) VALUES ('My  App ', 'c3', 'h')`,
+		`INSERT INTO applications (name, client_id, client_secret_hash) VALUES ('Untouched', 'c4', 'h')`,
+	} {
+		if _, err := s.DB().Exec(stmt); err != nil {
+			t.Fatalf("%s: %v", stmt, err)
+		}
+	}
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	reopened, err := Open(path)
+	if err != nil {
+		t.Fatalf("reopening a database with duplicate names failed: %v", err)
+	}
+	t.Cleanup(func() { _ = reopened.Close() })
+
+	apps, err := reopened.ListApplications(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(apps) != 4 {
+		t.Fatalf("%d applications survived, want all 4", len(apps))
+	}
+
+	seen := make(map[string]string, len(apps))
+	for _, app := range apps {
+		key := strings.ToLower(app.Name)
+		if other, clash := seen[key]; clash {
+			t.Errorf("%q and %q are still indistinguishable", other, app.Name)
+		}
+		seen[key] = app.Name
+		if app.Name != strings.Join(strings.Fields(app.Name), " ") {
+			t.Errorf("name %q was not normalised", app.Name)
+		}
+	}
+
+	// The name that was never a duplicate is left exactly as it was.
+	if _, ok := seen["untouched"]; !ok {
+		t.Error("an unaffected application was renamed")
+	}
+
+	// And the rule is in force from here on.
+	if _, _, err := reopened.CreateApplication(context.Background(), "Untouched", nil); !errors.Is(err, ErrValidation) {
+		t.Errorf("after the migration a duplicate name returned %v, want a validation error", err)
 	}
 }

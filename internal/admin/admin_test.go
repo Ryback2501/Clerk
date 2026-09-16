@@ -143,20 +143,41 @@ func (h *harness) createAppWithSecret(name string, uris ...string) (int64, strin
 			h.t.Fatalf("add redirect uri returned %d: %s", got.Code, got.Body.String())
 		}
 	}
-	return id, extractSecret(rec.Body.String())
+	return id, extractSecret(h.t, rec.Body.String())
 }
 
 var secretPattern = regexp.MustCompile(`<code class="value secret">([A-Za-z0-9_-]{40,})</code>`)
 
-func extractSecret(body string) string {
-	if !strings.Contains(body, "Copy it now") {
+// extractSecret returns the secret shown in a response, which may only ever be
+// inside the one-time dialog.
+func extractSecret(t *testing.T, body string) string {
+	t.Helper()
+	dialog := secretDialog(body)
+	if dialog == "" {
 		return ""
 	}
-	m := secretPattern.FindStringSubmatch(body)
+	m := secretPattern.FindStringSubmatch(dialog)
 	if m == nil {
 		return ""
 	}
+	if outside := secretPattern.FindStringSubmatch(strings.Replace(body, dialog, "", 1)); outside != nil {
+		t.Errorf("a secret is rendered outside the one-time dialog: %s", outside[1])
+	}
 	return m[1]
+}
+
+// secretDialog returns the one-time secret dialog's markup, or "" if the
+// response carries none.
+func secretDialog(body string) string {
+	start := strings.Index(body, "<dialog data-secret")
+	if start < 0 {
+		return ""
+	}
+	end := strings.Index(body[start:], "</dialog>")
+	if end < 0 {
+		return ""
+	}
+	return body[start : start+end+len("</dialog>")]
 }
 
 func appPath(id int64) string { return "/admin/applications/" + itoa(id) }
@@ -269,12 +290,14 @@ func TestListCarriesSummariesButNoInnerData(t *testing.T) {
 	app, _ := h.store.GetApplication(context.Background(), id)
 
 	body := h.get("/admin/applications").Body.String()
-	for _, want := range []string{"Listed Application", app.ClientID, `data-app="` + itoa(id) + `"`, `data-user-count="2"`} {
+	for _, want := range []string{"Listed Application", `data-app="` + itoa(id) + `"`, `data-user-count="2"`} {
 		if !strings.Contains(body, want) {
 			t.Errorf("the list does not contain %q", want)
 		}
 	}
-	for _, inner := range []string{"https://listed.example.com/cb", "user0", "sub-" + itoa(id) + "-0", "Danger zone"} {
+	// A folded row is the name and how many test users it has. The client id
+	// belongs in Credentials, and the registration date is of no use there.
+	for _, inner := range []string{app.ClientID, app.CreatedAt, "https://listed.example.com/cb", "user0", "sub-" + itoa(id) + "-0", "Danger zone"} {
 		if strings.Contains(body, inner) {
 			t.Errorf("the list already contains inner data %q", inner)
 		}
@@ -387,9 +410,15 @@ func TestCreateApplicationShowsTheSecretExactlyOnce(t *testing.T) {
 	if !strings.Contains(body, "Danger zone") {
 		t.Error("the create response is not the new application's panel")
 	}
-	shown := extractSecret(body)
+	shown := extractSecret(t, body)
 	if shown == "" {
 		t.Fatal("the freshly created secret was not displayed")
+	}
+	dialog := secretDialog(body)
+	for _, want := range []string{"will not be able", "Copy", "OK"} {
+		if !strings.Contains(dialog, want) {
+			t.Errorf("the secret dialog does not mention %q", want)
+		}
 	}
 	ok, err := h.store.VerifyClientSecret(context.Background(), id, shown)
 	if err != nil {
@@ -401,7 +430,7 @@ func TestCreateApplicationShowsTheSecretExactlyOnce(t *testing.T) {
 
 	for _, path := range []string{"/admin", "/admin/applications", appPath(id)} {
 		again := h.get(path).Body.String()
-		if strings.Contains(again, shown) || strings.Contains(again, "Copy it now") {
+		if strings.Contains(again, shown) || strings.Contains(again, "data-secret") {
 			t.Errorf("GET %s shows the client secret again", path)
 		}
 	}
@@ -437,7 +466,7 @@ func TestRegenerateSecretShowsANewSecretOnce(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("regenerate returned %d, want 200", rec.Code)
 	}
-	shown := extractSecret(rec.Body.String())
+	shown := extractSecret(t, rec.Body.String())
 	if shown == "" {
 		t.Fatal("the regenerated secret was not displayed")
 	}
@@ -463,9 +492,18 @@ func TestOtherPanelResponsesCarryNoSecret(t *testing.T) {
 	h := newHarness(t)
 	id, shown := h.createAppWithSecret("App")
 
-	rec := h.post(appPath(id)+"/redirect-uris", url.Values{"uri": {"https://x.example.com/cb"}})
-	if strings.Contains(rec.Body.String(), shown) || strings.Contains(rec.Body.String(), "Copy it now") {
-		t.Error("adding a redirect uri re-displayed the client secret")
+	for _, change := range []struct {
+		path string
+		form url.Values
+	}{
+		{appPath(id) + "/redirect-uris", url.Values{"uri": {"https://x.example.com/cb"}}},
+		{appPath(id) + "/users", url.Values{"username": {"david"}}},
+		{appPath(id) + "/name", url.Values{"name": {"Renamed"}}},
+	} {
+		body := h.post(change.path, change.form).Body.String()
+		if strings.Contains(body, shown) || strings.Contains(body, "data-secret") {
+			t.Errorf("POST %s re-displayed the client secret", change.path)
+		}
 	}
 }
 
@@ -681,4 +719,162 @@ func newForm(method, path, body string) *http.Request {
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	req.Header.Set(fragmentHeader, "1")
 	return req
+}
+
+// The panel opens with the application's name and the control that changes it,
+// and closes with a danger zone that is folded away until it is wanted.
+func TestPanelOpensWithTheNameAndFoldsTheDangerZone(t *testing.T) {
+	h := newHarness(t)
+	id := h.createApp("Panel Shape")
+
+	body := h.get(appPath(id)).Body.String()
+	for _, want := range []string{
+		`data-app-name="Panel Shape"`,
+		`commandfor="rename-` + itoa(id) + `"`,
+		`<dialog id="rename-` + itoa(id) + `"`,
+		"Rename application",
+		`<dialog id="regenerate-` + itoa(id) + `"`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("the panel does not contain %q", want)
+		}
+	}
+
+	danger := body[strings.Index(body, "danger-zone"):]
+	if !strings.Contains(body, `<details class="panel-section danger-zone"`) {
+		t.Error("the danger zone is not foldable")
+	}
+	if strings.Contains(danger[:strings.Index(danger, ">")+1], "open") {
+		t.Error("the danger zone is unfolded by default")
+	}
+
+	// The rename dialog is the register dialog with another title, so both must
+	// carry the same field.
+	rename := body[strings.Index(body, `<dialog id="rename-`):]
+	rename = rename[:strings.Index(rename, "</dialog>")]
+	if !strings.Contains(rename, `name="name"`) || !strings.Contains(rename, `value="Panel Shape"`) {
+		t.Error("the rename dialog does not offer the current name")
+	}
+}
+
+func TestCreateApplicationRejectsANameAlreadyInUse(t *testing.T) {
+	h := newHarness(t)
+	h.createApp("Only One")
+
+	rec := h.post("/admin/applications", url.Values{"name": {"  only   one  "}})
+	if rec.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("a duplicate name returned %d, want 422", rec.Code)
+	}
+	body := rec.Body.String()
+	if !strings.Contains(body, "already exists") {
+		t.Error("the error does not say the name is taken")
+	}
+	if !strings.Contains(body, `name="name"`) {
+		t.Error("the response is not the name form")
+	}
+
+	// The rejected name is offered back for correction, but what Cancel
+	// restores is still "no name at all".
+	if !strings.Contains(body, `data-original=""`) {
+		t.Error("the rejected name became the value the dialog reverts to")
+	}
+
+	apps, _ := h.store.ListApplications(context.Background())
+	if len(apps) != 1 {
+		t.Errorf("%d applications exist, want 1", len(apps))
+	}
+}
+
+func TestRenameApplication(t *testing.T) {
+	h := newHarness(t)
+	id := h.createApp("Before")
+
+	rec := h.post(appPath(id)+"/name", url.Values{"name": {"After"}})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("rename returned %d, want 200: %s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), `data-app-name="After"`) {
+		t.Error("the refreshed panel does not carry the new name")
+	}
+	if !strings.Contains(h.get("/admin/applications").Body.String(), "After") {
+		t.Error("the list does not show the new name")
+	}
+
+	apps, _ := h.store.ListApplications(context.Background())
+	if len(apps) != 1 {
+		t.Errorf("renaming left %d applications, want 1", len(apps))
+	}
+}
+
+func TestRenameApplicationRejectsANameInUse(t *testing.T) {
+	h := newHarness(t)
+	first := h.createApp("First")
+	h.createApp("Second")
+
+	rec := h.post(appPath(first)+"/name", url.Values{"name": {"Second"}})
+	if rec.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("got %d, want 422", rec.Code)
+	}
+	body := rec.Body.String()
+	if !strings.Contains(body, "already exists") {
+		t.Error("the error does not explain the conflict")
+	}
+	if !strings.Contains(body, `value="Second"`) {
+		t.Error("the rejected name was not kept in the form")
+	}
+	// Cancelling goes back to the name the application actually has.
+	if !strings.Contains(body, `data-original="First"`) {
+		t.Error("the rejected name became the value the dialog reverts to")
+	}
+
+	app, _ := h.store.GetApplication(context.Background(), first)
+	if app.Name != "First" {
+		t.Errorf("name = %q, want it unchanged", app.Name)
+	}
+}
+
+func TestRenameUnknownApplicationIsNotFound(t *testing.T) {
+	h := newHarness(t)
+	if rec := h.post("/admin/applications/4242/name", url.Values{"name": {"Whatever"}}); rec.Code != http.StatusNotFound {
+		t.Errorf("got %d, want 404", rec.Code)
+	}
+}
+
+// The register dialog checks the name while it is typed, so the administrator
+// learns it is taken before pressing anything.
+func TestNameCheck(t *testing.T) {
+	h := newHarness(t)
+	id := h.createApp("Taken")
+
+	for _, tc := range []struct {
+		query string
+		want  int
+	}{
+		{"name=Free", http.StatusNoContent},
+		{"name=Taken", http.StatusConflict},
+		{"name=++taken++", http.StatusConflict},
+		{"name=Taken&exclude=" + itoa(id), http.StatusNoContent},
+		{"name=Taken&exclude=not-a-number", http.StatusConflict},
+		{"name=", http.StatusNoContent},
+	} {
+		t.Run(tc.query, func(t *testing.T) {
+			rec := h.get("/admin/applications/name-check?" + tc.query)
+			if rec.Code != tc.want {
+				t.Fatalf("got %d, want %d: %s", rec.Code, tc.want, rec.Body.String())
+			}
+			if tc.want == http.StatusConflict && !strings.Contains(rec.Body.String(), "already in use") {
+				t.Errorf("the reply does not say the name is in use: %s", rec.Body.String())
+			}
+			// A cached "that name is free" would keep offering a name someone
+			// else has since registered.
+			if got := rec.Header().Get("Cache-Control"); got != "no-store" {
+				t.Errorf("Cache-Control = %q, want no-store", got)
+			}
+		})
+	}
+
+	// It is part of the interface, not an endpoint of its own.
+	if rec := h.page("/admin/applications/name-check?name=Free"); rec.Code != http.StatusSeeOther {
+		t.Errorf("a browser visit returned %d, want a 303 to /admin", rec.Code)
+	}
 }

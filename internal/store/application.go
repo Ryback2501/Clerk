@@ -44,9 +44,9 @@ type Application struct {
 // returned string is the plaintext client secret, which the caller must show to
 // the administrator once and then discard: it cannot be recovered afterwards.
 func (s *Store) CreateApplication(ctx context.Context, name string, redirectURIs []string) (*Application, string, error) {
-	name = strings.TrimSpace(name)
-	if name == "" {
-		return nil, "", invalidf("application name must not be empty")
+	name, err := s.claimName(ctx, name, 0)
+	if err != nil {
+		return nil, "", err
 	}
 	for _, uri := range redirectURIs {
 		if err := ValidateRedirectURI(uri); err != nil {
@@ -82,6 +82,12 @@ func (s *Store) CreateApplication(ctx context.Context, name string, redirectURIs
 		`INSERT INTO applications (name, client_id, client_secret_hash) VALUES (?, ?, ?)`,
 		name, clientID, hash)
 	if err != nil {
+		// Two administrators registering the same name at once both pass the
+		// check above; the index is what actually decides, so its refusal is
+		// reported as the same validation failure rather than as a fault.
+		if isDuplicateApplicationName(err) {
+			return nil, "", duplicateNameError(name)
+		}
 		return nil, "", fmt.Errorf("insert application: %w", err)
 	}
 	id, err := res.LastInsertId()
@@ -104,6 +110,86 @@ func (s *Store) CreateApplication(ctx context.Context, name string, redirectURIs
 		return nil, "", err
 	}
 	return app, plainSecret, nil
+}
+
+// normalizeName trims an application name and collapses inner runs of
+// whitespace, so names that read identically are stored identically.
+func normalizeName(name string) string { return strings.Join(strings.Fields(name), " ") }
+
+func duplicateNameError(name string) error {
+	return invalidf("an application named %q already exists", name)
+}
+
+// NameIsAvailable reports whether an application may be given this name.
+// excludeID is the application being renamed, which never collides with itself;
+// pass 0 when registering a new one.
+func (s *Store) NameIsAvailable(ctx context.Context, name string, excludeID int64) (bool, error) {
+	name = normalizeName(name)
+	if name == "" {
+		return false, nil
+	}
+
+	var taken bool
+	err := s.db.QueryRowContext(ctx,
+		`SELECT EXISTS (SELECT 1 FROM applications WHERE lower(name) = lower(?) AND id <> ?)`,
+		name, excludeID).Scan(&taken)
+	if err != nil {
+		return false, fmt.Errorf("check application name: %w", err)
+	}
+	return !taken, nil
+}
+
+// claimName validates a name for the application identified by excludeID (0
+// when it does not exist yet) and returns it normalised.
+func (s *Store) claimName(ctx context.Context, name string, excludeID int64) (string, error) {
+	name = normalizeName(name)
+	if name == "" {
+		return "", invalidf("application name must not be empty")
+	}
+
+	free, err := s.NameIsAvailable(ctx, name, excludeID)
+	if err != nil {
+		return "", err
+	}
+	if !free {
+		return "", duplicateNameError(name)
+	}
+	return name, nil
+}
+
+// RenameApplication changes only the label an administrator sees. The client
+// id, secret, redirect URIs and users are untouched, so a client configured
+// against this application keeps working.
+func (s *Store) RenameApplication(ctx context.Context, appID int64, name string) error {
+	if _, err := s.GetApplication(ctx, appID); err != nil {
+		return err
+	}
+
+	name, err := s.claimName(ctx, name, appID)
+	if err != nil {
+		return err
+	}
+
+	res, err := s.db.ExecContext(ctx, `UPDATE applications SET name = ? WHERE id = ?`, name, appID)
+	if err != nil {
+		if isDuplicateApplicationName(err) {
+			return duplicateNameError(name)
+		}
+		return fmt.Errorf("rename application: %w", err)
+	}
+	return expectOneRow(res, "application")
+}
+
+// isDuplicateApplicationName reports whether err is the unique-name index
+// refusing a row, as opposed to any other constraint. The driver exports no
+// typed error, so the message naming the index is the only signal available.
+func isDuplicateApplicationName(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "unique constraint failed") &&
+		strings.Contains(msg, "idx_applications_name_unique")
 }
 
 // ListApplications returns every registered client, ordered by name.

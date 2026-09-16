@@ -1,0 +1,24 @@
+{{define "name-form" -}}
+<form class="modal-form" method="post" action="{{.Action}}" data-name-form data-dialog="{{.DialogID}}" data-exclude="{{.ExcludeID}}">
+  <input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
+  <header class="modal-header">
+    <p class="modal-title" id="{{.DialogID}}-title">{{.Title}}</p>
+  </header>
+  <div class="modal-body">
+    <div class="form-group">
+      <label for="{{.DialogID}}-name">Application name</label>
+      <input id="{{.DialogID}}-name" class="form-control{{if .Error}} is-invalid{{end}}" type="text" name="name"
+             value="{{.Name}}" data-original="{{.Original}}" required pattern=".*\S.*" title="The name cannot be blank."
+             autocomplete="off" autofocus placeholder="My Test Application">
+      <!-- Always present, so filling it in cannot resize the dialog. -->
+      <p class="field-message" data-name-message role="alert">{{.Error}}</p>
+    </div>
+  </div>
+  <footer class="modal-footer">
+    <button type="button" class="btn btn-inverse-secondary" commandfor="{{.DialogID}}" command="close">Cancel</button>
+    <!-- Nothing to save until the name actually changes to one that is free;
+         the live check disables it again whenever that name is taken. -->
+    <button type="submit" class="btn btn-inverse-primary" data-submit disabled>{{.Submit}}</button>
+  </footer>
+</form>
+{{- end}}

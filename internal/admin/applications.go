@@ -26,15 +26,55 @@ type pageData struct {
 	SignedIn bool
 
 	// Register is the shell's empty registration form.
-	Register registerForm
+	Register nameForm
 }
 
-// registerForm is the body of the registration dialog. On a rejected
-// submission it carries back what was typed and why it was refused.
-type registerForm struct {
+// nameForm is the dialog that names an application. Registering and renaming
+// differ only in what it posts to and what it is called, so both render it and
+// cannot drift apart. On a rejected submission it carries back what was typed
+// and why it was refused.
+type nameForm struct {
+	Title     string
+	Action    string
+	Submit    string
+	DialogID  string
 	CSRFToken string
-	Name      string
-	Error     string
+
+	// Name is what the field holds: the stored name, or what was typed and
+	// refused. Original is what the application is actually called, which is
+	// what cancelling restores and what "unchanged" is measured against — empty
+	// while registering.
+	Name     string
+	Original string
+
+	// ExcludeID is the application the live duplicate check must ignore, so a
+	// rename never collides with itself. It is 0 while registering.
+	ExcludeID int64
+
+	Error string
+}
+
+func registerForm(token string) nameForm {
+	return nameForm{
+		Title:     "Register an application",
+		Action:    "/admin/applications",
+		Submit:    "Create",
+		DialogID:  "register",
+		CSRFToken: token,
+	}
+}
+
+func renameForm(token string, app *store.Application) nameForm {
+	return nameForm{
+		Title:     "Rename application",
+		Action:    "/admin/applications/" + strconv.FormatInt(app.ID, 10) + "/name",
+		Submit:    "Save",
+		DialogID:  "rename-" + strconv.FormatInt(app.ID, 10),
+		CSRFToken: token,
+		Name:      app.Name,
+		Original:  app.Name,
+		ExcludeID: app.ID,
+	}
 }
 
 // listData is the application list: only what a folded application shows.
@@ -53,8 +93,12 @@ type panelData struct {
 	App       *store.Application
 	Users     []*store.User
 
+	// RenameForm is the dialog that renames this application.
+	RenameForm nameForm
+
 	// RevealedSecret is set only in the response to the request that generated
-	// the secret. It is never stored and no other response carries it.
+	// the secret, and is rendered into a dialog shown once. It is never stored,
+	// and no other response carries it.
 	RevealedSecret string
 
 	// URIError/URIForm and UserError/UserForm carry a rejected submission back
@@ -114,11 +158,10 @@ func (h *Handler) createApplication(w http.ResponseWriter, r *http.Request, admi
 			h.internalError(w, r, admin, "create application", err)
 			return
 		}
-		h.renderFragment(w, r, "register-form", http.StatusUnprocessableEntity, registerForm{
-			CSRFToken: h.csrf.Issue(w, r),
-			Name:      typed,
-			Error:     validationMessage(err),
-		})
+		rejected := registerForm(h.csrf.Issue(w, r))
+		rejected.Name = typed
+		rejected.Error = validationMessage(err)
+		h.renderFragment(w, r, "name-form", http.StatusUnprocessableEntity, rejected)
 		return
 	}
 
@@ -127,6 +170,71 @@ func (h *Handler) createApplication(w http.ResponseWriter, r *http.Request, admi
 
 	w.Header().Set(createdHeader, strconv.FormatInt(app.ID, 10))
 	h.renderPanel(w, r, admin, app.ID, http.StatusCreated, panelData{RevealedSecret: plainSecret})
+}
+
+// renameApplication changes the application's label. Everything a client is
+// configured with stays as it is.
+func (h *Handler) renameApplication(w http.ResponseWriter, r *http.Request, admin *adminauth.Admin) {
+	app, ok := h.lookupApplication(w, r, admin)
+	if !ok {
+		return
+	}
+
+	typed := r.PostFormValue("name")
+	if err := h.store.RenameApplication(r.Context(), app.ID, typed); err != nil {
+		switch {
+		case errors.Is(err, store.ErrValidation):
+			rejected := renameForm(h.csrf.Issue(w, r), app)
+			rejected.Name = typed
+			rejected.Error = validationMessage(err)
+			h.renderFragment(w, r, "name-form", http.StatusUnprocessableEntity, rejected)
+		case errors.Is(err, store.ErrNotFound):
+			h.notFound(w, r, admin)
+		default:
+			h.internalError(w, r, admin, "rename application", err)
+		}
+		return
+	}
+
+	h.logger.InfoContext(r.Context(), "application renamed",
+		"application_id", app.ID, "client_id", app.ClientID, "admin", admin.Subject)
+
+	h.renderPanel(w, r, admin, app.ID, http.StatusOK, panelData{})
+}
+
+// checkName answers the dialog's live duplicate check: no content while the
+// name is free, and the message to show when it is not.
+func (h *Handler) checkName(w http.ResponseWriter, r *http.Request, admin *adminauth.Admin) {
+	// A malformed exclude is nobody's application, so the name is simply
+	// checked against every row.
+	exclude, _ := strconv.ParseInt(r.URL.Query().Get("exclude"), 10, 64)
+
+	name := r.URL.Query().Get("name")
+	if strings.TrimSpace(name) == "" {
+		// An empty box is not a conflict; the field is required, which is what
+		// stops it from being submitted.
+		h.nameIsFree(w)
+		return
+	}
+
+	free, err := h.store.NameIsAvailable(r.Context(), name, exclude)
+	if err != nil {
+		h.internalError(w, r, admin, "check application name", err)
+		return
+	}
+	if free {
+		h.nameIsFree(w)
+		return
+	}
+	h.renderFragment(w, r, "name-taken", http.StatusConflict, nil)
+}
+
+// nameIsFree answers that nothing holds the name. It carries the same headers
+// as every other answer: a cached "free" would go on offering a name somebody
+// has since registered.
+func (h *Handler) nameIsFree(w http.ResponseWriter) {
+	setSecurityHeaders(w)
+	w.WriteHeader(http.StatusNoContent)
 }
 
 func (h *Handler) regenerateSecret(w http.ResponseWriter, r *http.Request, admin *adminauth.Admin) {
@@ -227,6 +335,7 @@ func (h *Handler) renderPanel(w http.ResponseWriter, r *http.Request, admin *adm
 	data.CSRFToken = h.csrf.Issue(w, r)
 	data.App = app
 	data.Users = users
+	data.RenameForm = renameForm(data.CSRFToken, app)
 	h.renderFragment(w, r, "panel", status, data)
 }
 

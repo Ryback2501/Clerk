@@ -139,15 +139,20 @@ In the admin interface (`<ISSUER>/admin`):
 Everything happens on that one page: each application is a card that unfolds to show its
 credentials, redirect URIs, test users and a danger zone.
 
-1. **Register application** (below the list) and give it a name. The new application
-   appears unfolded, ready to set up.
-2. Copy the **client ID** and **client secret**. The secret is shown once, in that card,
-   until the page is reloaded; if it is lost, regenerate it, which invalidates the old one.
+1. **Register application** (below the list) and give it a name. Names are unique, and the
+   dialog says so while you type. The new application appears unfolded, ready to set up.
+2. The **client secret** appears in a dialog, once. Click it to copy it, then close the
+   dialog — Clerk keeps only a hash and cannot show it again. If it is lost, **Regenerate
+   client secret** issues a new one, invalidating the old one, and shows it the same way.
+   The **client ID** is not secret and stays under Credentials.
 3. **Add a redirect URI**. Each must be an absolute `http` or `https` URL with a host and
    no `#fragment`, and is matched **exactly** at sign-in — a different port, path or
    trailing slash is refused.
 4. **Add test users**. These are the identities offered on the sign-in screen. An
    application with no users cannot sign anyone in.
+
+**Rename**, at the top of an unfolded application, changes only its label: the client ID,
+secret, redirect URIs and users stay as they are.
 
 ### 2. Configure the client
 

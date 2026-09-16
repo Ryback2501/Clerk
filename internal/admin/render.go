@@ -26,7 +26,7 @@ func (h *Handler) newPageData(w http.ResponseWriter, r *http.Request, admin *adm
 		CSRFToken: token,
 		CSRFField: web.CSRFFieldName,
 		SignedIn:  admin != nil && h.oauth != nil,
-		Register:  registerForm{CSRFToken: token},
+		Register:  registerForm(token),
 	}
 }
 
@@ -65,17 +65,23 @@ func (h *Handler) write(w http.ResponseWriter, r *http.Request, tmpl *template.T
 	}
 
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	w.Header().Set("X-Content-Type-Options", "nosniff")
-	w.Header().Set("X-Frame-Options", "DENY")
-	w.Header().Set("Referrer-Policy", "no-referrer")
-	w.Header().Set("Content-Security-Policy", contentSecurityPolicy)
-	// Responses reflect mutable state and may carry a one-time secret.
-	w.Header().Set("Cache-Control", "no-store")
+	setSecurityHeaders(w)
 
 	w.WriteHeader(status)
 	if _, err := buf.WriteTo(w); err != nil {
 		h.logger.ErrorContext(r.Context(), "write response", "template", name, "err", err)
 	}
+}
+
+// setSecurityHeaders applies the policy every admin response carries. Answers
+// reflect mutable state and may carry a one-time secret, so none of them may be
+// stored by anything in between.
+func setSecurityHeaders(w http.ResponseWriter) {
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	w.Header().Set("X-Frame-Options", "DENY")
+	w.Header().Set("Referrer-Policy", "no-referrer")
+	w.Header().Set("Content-Security-Policy", contentSecurityPolicy)
+	w.Header().Set("Cache-Control", "no-store")
 }
 
 // renderError reports a failure in the form the requester can display: an

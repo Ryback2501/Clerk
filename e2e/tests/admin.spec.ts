@@ -4,9 +4,11 @@ import {
   addUser,
   applicationCard,
   applicationList,
+  cardSummary,
   openApplication,
   panelAlert,
   registerApplication,
+  secretDialog,
   uniqueName,
 } from "./helpers";
 
@@ -44,17 +46,16 @@ test.describe("administration", () => {
     // The admin never leaves the one page.
     expect(new URL(page.url()).pathname).toBe("/admin");
 
-    // Setting the application up (registerApplication added a redirect URI)
-    // must not wipe the secret before it has been copied.
-    const created = applicationCard(page, id);
-    await expect(created.locator("code.secret")).toHaveText(clientSecret);
+    // Once its dialog is closed the secret is nowhere in the page.
+    await expect(page.locator("code.secret")).toHaveCount(0);
+    await expect(page.getByText(clientSecret)).toBeHidden();
     await addUser(page, id, "david");
-    await expect(created.locator("code.secret")).toHaveText(clientSecret);
+    await expect(page.locator("code.secret")).toHaveCount(0);
 
     // Reloading must not show it again: only a hash is stored.
     await page.reload();
     const card = await openApplication(page, id);
-    await expect(card.getByText("Copy it now")).toBeHidden();
+    await expect(secretDialog(page)).toHaveCount(0);
     await expect(page.getByText(clientSecret)).toBeHidden();
 
     // The client id is not a secret and stays visible.
@@ -71,13 +72,16 @@ test.describe("administration", () => {
     await page.getByRole("button", { name: "Register application" }).click();
     const dialog = page.getByRole("dialog", { name: "Register an application" });
     const name = dialog.getByLabel("Application name");
+    const create = dialog.getByRole("button", { name: "Create" });
 
     for (const blank of ["", "   "]) {
       await name.fill(blank);
-      await dialog.getByRole("button", { name: "Create" }).click();
-      await expect(dialog).toBeVisible();
+      await expect(create).toBeDisabled();
       expect(await name.evaluate((input: HTMLInputElement) => input.validity.valid)).toBe(false);
     }
+    await name.fill(uniqueName("Named"));
+    await expect(create).toBeEnabled();
+    await expect(dialog).toBeVisible();
     expect(posted).toBe(0);
 
     await dialog.getByRole("button", { name: "Cancel" }).click();
@@ -95,7 +99,7 @@ test.describe("administration", () => {
     await expect(card.getByLabel("Add a redirect URI")).toHaveValue("not-a-url");
   });
 
-  test("regenerating the secret replaces the previous one", async ({ page }) => {
+  test("regenerating the secret asks first, then shows the new one once", async ({ page }) => {
     const { clientSecret, id } = await registerApplication(
       page,
       uniqueName("Rotating Application"),
@@ -105,8 +109,148 @@ test.describe("administration", () => {
     const card = await openApplication(page, id);
     await card.getByRole("button", { name: "Regenerate client secret" }).click();
 
-    await expect(card.getByText("Copy it now")).toBeVisible();
-    await expect(card.locator("code.secret")).not.toHaveText(clientSecret);
+    const confirm = page.getByRole("dialog", { name: "Regenerate the client secret?" });
+    await expect(confirm).toBeVisible();
+    await confirm.getByRole("button", { name: "Cancel" }).click();
+    await expect(confirm).toBeHidden();
+    await expect(secretDialog(page)).toHaveCount(0);
+
+    await card.getByRole("button", { name: "Regenerate client secret" }).click();
+    await confirm.getByRole("button", { name: "OK", exact: true }).click();
+
+    const secret = secretDialog(page);
+    await expect(secret).toBeVisible();
+    await expect(secret.locator("code.secret")).not.toHaveText(clientSecret);
+    await secret.getByRole("button", { name: "OK", exact: true }).click();
+    await expect(page.locator("code.secret")).toHaveCount(0);
+  });
+
+  test("the secret dialog explains itself and copies to the clipboard", async ({ page, context }) => {
+    await context.grantPermissions(["clipboard-read", "clipboard-write"]);
+    await applicationList(page);
+
+    await page.getByRole("button", { name: "Register application" }).click();
+    const dialog = page.getByRole("dialog", { name: "Register an application" });
+    await dialog.getByLabel("Application name").fill(uniqueName("Copyable"));
+    await dialog.getByRole("button", { name: "Create" }).click();
+
+    const secret = secretDialog(page);
+    await expect(secret).toBeVisible();
+    await expect(secret).toContainText("will not be able to see or retrieve this secret again");
+    await expect(secret.getByText("Copied")).toBeHidden();
+
+    const shown = (await secret.locator("code.secret").innerText()).trim();
+    await secret.locator("[data-copy]").click();
+    await expect(secret.getByText("Copied")).toBeVisible();
+    expect(await page.evaluate(() => navigator.clipboard.readText())).toBe(shown);
+
+    await secret.getByRole("button", { name: "OK", exact: true }).click();
+    await expect(secret).toHaveCount(0);
+    await expect(page.getByText(shown)).toBeHidden();
+  });
+
+  test("an application name cannot be used twice", async ({ page }) => {
+    const name = uniqueName("Unique Name");
+    await registerApplication(page, name, "https://unique.example.com/cb");
+
+    await page.getByRole("button", { name: "Register application" }).click();
+    const dialog = page.getByRole("dialog", { name: "Register an application" });
+    const create = dialog.getByRole("button", { name: "Create" });
+    const before = (await dialog.boundingBox())!;
+
+    // The check runs while it is typed, in a slot that is always in the layout.
+    await dialog.getByLabel("Application name").fill(name.toUpperCase());
+    await expect(dialog.getByText("That name is already in use")).toBeVisible();
+    await expect(create).toBeDisabled();
+    expect((await dialog.boundingBox())!.height).toBe(before.height);
+
+    await dialog.getByLabel("Application name").fill(`${name} II`);
+    await expect(dialog.getByText("That name is already in use")).toBeHidden();
+    await expect(create).toBeEnabled();
+
+    await dialog.getByRole("button", { name: "Cancel" }).click();
+  });
+
+  test("an application can be renamed through the same dialog", async ({ page }) => {
+    const before = uniqueName("Before Rename");
+    const after = uniqueName("After Rename");
+    const app = await registerApplication(page, before, "https://rename.example.com/cb");
+
+    const card = await openApplication(page, app.id);
+    await card.getByRole("button", { name: "Rename" }).click();
+
+    const dialog = page.getByRole("dialog", { name: "Rename application" });
+    const save = dialog.getByRole("button", { name: "Save" });
+    await expect(dialog.getByLabel("Application name")).toHaveValue(before);
+    // The name it already has is not a change worth saving.
+    await expect(save).toBeDisabled();
+
+    // A cancelled attempt is forgotten rather than reopened.
+    await dialog.getByLabel("Application name").fill("Scratch");
+    await dialog.getByRole("button", { name: "Cancel" }).click();
+    await card.getByRole("button", { name: "Rename" }).click();
+    await expect(dialog.getByLabel("Application name")).toHaveValue(before);
+    await expect(save).toBeDisabled();
+
+    await dialog.getByLabel("Application name").fill(after);
+    await expect(save).toBeEnabled();
+    await save.click();
+
+    await expect(dialog).toBeHidden();
+    await expect(cardSummary(card)).toContainText(after);
+    await expect(card.locator(".name-value")).toHaveText(after);
+    // Renaming changes a label, and nothing else.
+    await expect(applicationCard(page, app.id).locator(".credentials code.value").first())
+      .toHaveText(app.clientId);
+    await expect(page.locator(`#applications .app-name`, { hasText: before })).toHaveCount(0);
+  });
+
+  test("the folded row shows the name and the user count, and nothing else", async ({ page }) => {
+    const app = await registerApplication(page, uniqueName("Tidy Row"), "https://tidy.example.com/cb");
+    await addUser(page, app.id, "david");
+    await page.reload();
+
+    const summary = cardSummary(applicationCard(page, app.id));
+    await expect(summary).toContainText("1 test user");
+    await expect(summary).not.toContainText(app.clientId);
+    await expect(summary).not.toContainText("202");
+  });
+
+  test("the danger zone starts folded", async ({ page }) => {
+    const app = await registerApplication(page, uniqueName("Careful"), "https://careful.example.com/cb");
+    await page.reload();
+    const card = await openApplication(page, app.id);
+
+    const danger = card.locator("details.danger-zone");
+    await expect(danger).toHaveJSProperty("open", false);
+    await expect(card.getByRole("button", { name: "Delete application" })).toBeHidden();
+
+    await danger.locator("summary").click();
+    await expect(card.getByRole("button", { name: "Delete application" })).toBeVisible();
+  });
+
+  test("the add forms keep the focus, so entries can be typed one after another", async ({ page }) => {
+    const app = await registerApplication(page, uniqueName("Fast Entry"), "https://fast.example.com/cb");
+    const card = await openApplication(page, app.id);
+
+    // Enter submits, and the box is ready for the next name.
+    await card.getByLabel("Add a test user").fill("david");
+    await card.getByLabel("Add a test user").press("Enter");
+    await expect(card.getByRole("cell", { name: "david", exact: true })).toBeVisible();
+    await expect(card.getByLabel("Add a test user")).toBeFocused();
+    await expect(card.getByLabel("Add a test user")).toHaveValue("");
+
+    await page.keyboard.type("alice");
+    await page.keyboard.press("Enter");
+    await expect(card.getByRole("cell", { name: "alice", exact: true })).toBeVisible();
+    await expect(card.getByLabel("Add a test user")).toBeFocused();
+
+    // The same for redirect URIs, whether submitted by button or by Enter.
+    await card.getByLabel("Add a redirect URI").fill("https://second.example.com/cb");
+    await card.getByRole("button", { name: "Add redirect URI" }).click();
+    await expect(card.getByRole("cell", { name: "https://second.example.com/cb", exact: true })).toBeVisible();
+    await expect(card.getByLabel("Add a redirect URI")).toBeFocused();
+    await expect(card.getByLabel("Add a redirect URI")).toHaveValue("");
   });
 
   test("the same user name is allowed in two applications", async ({ page }) => {
@@ -140,7 +284,8 @@ test.describe("administration", () => {
     await addUser(page, app.id, "alice");
 
     const card = await openApplication(page, app.id);
-    await expect(card.locator("summary")).toContainText("2 test users");
+    await expect(cardSummary(card)).toContainText("2 test users");
+    await card.locator("details.danger-zone summary").click();
     await card.getByRole("button", { name: "Delete application" }).click();
 
     const dialog = page.getByRole("dialog", { name: "Delete application?" });
@@ -169,8 +314,8 @@ test.describe("administration", () => {
     const afterCreate = panelRequests(page, app.id);
     const card = applicationCard(page, app.id);
     for (let i = 0; i < 2; i++) {
-      await card.locator("summary").click();
-      await card.locator("summary").click();
+      await cardSummary(card).click();
+      await cardSummary(card).click();
     }
     await expect(card.locator(".panel")).toBeVisible();
     expect(afterCreate).toHaveLength(0);
@@ -183,9 +328,9 @@ test.describe("administration", () => {
 
     await openApplication(page, app.id);
     for (let i = 0; i < 2; i++) {
-      await card.locator("summary").click();
+      await cardSummary(card).click();
       await expect(card).toHaveJSProperty("open", false);
-      await card.locator("summary").click();
+      await cardSummary(card).click();
       await expect(card.locator(".panel")).toBeVisible();
     }
     expect(afterReload).toHaveLength(1);
@@ -220,7 +365,7 @@ test.describe("administration", () => {
     // Bringing an application into view — as the page does after creating one —
     // stops below the bar, not underneath it.
     await page.keyboard.press("End");
-    const summary = applicationCard(page, app.id).locator("summary");
+    const summary = cardSummary(applicationCard(page, app.id));
     await summary.evaluate((el) => el.scrollIntoView({ block: "start" }));
     const bar = (await page.locator(".topbar").boundingBox())!;
     const box = (await summary.boundingBox())!;
@@ -267,14 +412,14 @@ test.describe("administration", () => {
 
     const card = applicationCard(page, app.id);
     const host = card.locator(".panel-host");
-    await card.locator("summary").click();
+    await cardSummary(card).click();
     await expect(host).toHaveAttribute("aria-busy", "true");
     await expect(host).toHaveJSProperty("inert", true);
 
     // The summary stays usable mid-load, and unfolding again does not ask twice.
-    await card.locator("summary").click();
+    await cardSummary(card).click();
     await expect(card).toHaveJSProperty("open", false);
-    await card.locator("summary").click();
+    await cardSummary(card).click();
     await expect(card).toHaveJSProperty("open", true);
     await expect(host).toHaveAttribute("aria-busy", "true");
 
