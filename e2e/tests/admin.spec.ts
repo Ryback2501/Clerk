@@ -5,8 +5,9 @@ import {
   applicationCard,
   applicationList,
   cardSummary,
+  fieldMessage,
+  hoverRow,
   openApplication,
-  panelAlert,
   registerApplication,
   secretDialog,
   uniqueName,
@@ -95,7 +96,8 @@ test.describe("administration", () => {
     await card.getByLabel("Add a redirect URI").fill("not-a-url");
     await card.getByRole("button", { name: "Add redirect URI" }).click();
 
-    await expect(panelAlert(card)).toContainText("redirect uri");
+    // The reason appears under the field, where the hint was.
+    await expect(fieldMessage(card, "uri")).toContainText("redirect uri");
     await expect(card.getByLabel("Add a redirect URI")).toHaveValue("not-a-url");
   });
 
@@ -266,15 +268,172 @@ test.describe("administration", () => {
     expect(subA).not.toEqual(subB);
   });
 
-  test("a duplicate user name within one application is refused", async ({ page }) => {
-    const app = await registerApplication(page, uniqueName("Duplicate Users"), "https://dup.example.com/cb");
+  test("a duplicate is refused as it is typed, in both add forms", async ({ page }) => {
+    const app = await registerApplication(page, uniqueName("Duplicates"), "https://dup.example.com/cb");
     await addUser(page, app.id, "david");
-
     const card = await openApplication(page, app.id);
-    await card.getByLabel("Add a test user").fill("david");
-    await card.getByRole("button", { name: "Add user" }).click();
-    await expect(panelAlert(card)).toContainText("already exists");
-    await expect(card.getByLabel("Add a test user")).toHaveValue("david");
+
+    const userBox = card.getByLabel("Add a test user");
+    const addUserButton = card.getByRole("button", { name: "Add user" });
+    await userBox.fill("david");
+    await expect(card.getByText("A user with that name already exists")).toBeVisible();
+    await expect(addUserButton).toBeDisabled();
+    await userBox.fill("alice");
+    await expect(card.getByText("A user with that name already exists")).toBeHidden();
+    await expect(addUserButton).toBeEnabled();
+
+    const uriBox = card.getByLabel("Add a redirect URI");
+    const addUriButton = card.getByRole("button", { name: "Add redirect URI" });
+    const hint = card.getByText("Matched exactly at authorization time");
+    await expect(hint).toBeVisible();
+
+    await uriBox.fill("https://dup.example.com/cb");
+    await expect(card.getByText("That redirect URI is already registered")).toBeVisible();
+    // The message takes the hint's place rather than pushing the page around.
+    await expect(hint).toBeHidden();
+    await expect(addUriButton).toBeDisabled();
+
+    await uriBox.fill("https://other.example.com/cb");
+    await expect(card.getByText("That redirect URI is already registered")).toBeHidden();
+    await expect(hint).toBeVisible();
+    await expect(addUriButton).toBeEnabled();
+  });
+
+  test("removing a user or a redirect URI asks first", async ({ page }) => {
+    const app = await registerApplication(page, uniqueName("Confirmed Removal"), "https://keep.example.com/cb");
+    await addUser(page, app.id, "david");
+    const card = await openApplication(page, app.id);
+
+    // Cancelling leaves everything as it was.
+    await (await hoverRow(card, /david/)).getByRole("button", { name: "Delete" }).click();
+    const userDialog = page.getByRole("dialog", { name: "Delete this test user?" });
+    await expect(userDialog).toContainText("david");
+    await userDialog.getByRole("button", { name: "Cancel" }).click();
+    await expect(card.getByRole("cell", { name: "david", exact: true })).toBeVisible();
+
+    await (await hoverRow(card, /keep.example.com/)).getByRole("button", { name: "Remove" }).click();
+    const uriDialog = page.getByRole("dialog", { name: "Remove this redirect URI?" });
+    await expect(uriDialog).toContainText("https://keep.example.com/cb");
+    await uriDialog.getByRole("button", { name: "Cancel" }).click();
+    await expect(card.getByRole("cell", { name: "https://keep.example.com/cb", exact: true })).toBeVisible();
+
+    // Confirming goes through.
+    await (await hoverRow(card, /david/)).getByRole("button", { name: "Delete" }).click();
+    await userDialog.getByRole("button", { name: "Delete", exact: true }).click();
+    await expect(card.getByRole("cell", { name: "david", exact: true })).toBeHidden();
+
+    await (await hoverRow(card, /keep.example.com/)).getByRole("button", { name: "Remove" }).click();
+    await uriDialog.getByRole("button", { name: "Remove", exact: true }).click();
+    await expect(card.getByRole("cell", { name: "https://keep.example.com/cb", exact: true })).toBeHidden();
+  });
+
+  test("row actions belong to their own application when several are unfolded", async ({ page }) => {
+    const first = await registerApplication(page, uniqueName("Both Open A"), "https://first.example.com/cb");
+    const second = await registerApplication(page, uniqueName("Both Open B"), "https://second.example.com/cb");
+
+    const firstCard = await openApplication(page, first.id);
+    const secondCard = await openApplication(page, second.id);
+    await expect(firstCard).toHaveJSProperty("open", true);
+
+    // Both panels hold a first redirect-URI row; the button must reach its own.
+    await (await hoverRow(secondCard, /second.example.com/)).getByRole("button", { name: "Remove" }).click();
+    const dialog = page.getByRole("dialog", { name: "Remove this redirect URI?" });
+    await expect(dialog).toContainText("https://second.example.com/cb");
+    await dialog.getByRole("button", { name: "Remove", exact: true }).click();
+
+    await expect(secondCard.getByRole("cell", { name: "https://second.example.com/cb", exact: true })).toBeHidden();
+    await expect(firstCard.getByRole("cell", { name: "https://first.example.com/cb", exact: true })).toBeVisible();
+  });
+
+  test("a user can be renamed without changing its subject", async ({ page }) => {
+    const app = await registerApplication(page, uniqueName("Renamed User"), "https://ru.example.com/cb");
+    await addUser(page, app.id, "david");
+    await addUser(page, app.id, "alice");
+    const card = await openApplication(page, app.id);
+
+    const sub = await card.getByRole("row", { name: /david/ }).locator("code.value").innerText();
+    await (await hoverRow(card, /david/)).getByRole("button", { name: "Rename" }).click();
+
+    const dialog = page.getByRole("dialog", { name: "Rename test user" });
+    const save = dialog.getByRole("button", { name: "Save" });
+    const box = dialog.getByLabel("User name");
+    await expect(box).toHaveValue("david");
+    await expect(save).toBeDisabled();
+
+    // The dialog refuses a duplicate exactly as the add form does.
+    await box.fill("alice");
+    await expect(dialog.getByText("A user with that name already exists")).toBeVisible();
+    await expect(save).toBeDisabled();
+
+    await box.fill("David Jones");
+    await expect(dialog.getByText("A user with that name already exists")).toBeHidden();
+    await expect(save).toBeEnabled();
+    await save.click();
+
+    await expect(dialog).toBeHidden();
+    await expect(card.getByRole("cell", { name: "David Jones", exact: true })).toBeVisible();
+    // The sub is what a client stores; renaming must not disturb it.
+    await expect(card.getByRole("row", { name: /David Jones/ }).locator("code.value")).toHaveText(sub);
+  });
+
+  test("a redirect URI can be corrected in place", async ({ page }) => {
+    const app = await registerApplication(page, uniqueName("Edited URI"), "https://typo.example.com/cb");
+    await addRedirectUri(page, app.id, "https://other.example.com/cb");
+    const card = await openApplication(page, app.id);
+
+    await (await hoverRow(card, /typo.example.com/)).getByRole("button", { name: "Edit" }).click();
+    const dialog = page.getByRole("dialog", { name: "Edit redirect URI" });
+    const save = dialog.getByRole("button", { name: "Save" });
+    const box = dialog.getByLabel("Redirect URI");
+    await expect(box).toHaveValue("https://typo.example.com/cb");
+    await expect(save).toBeDisabled();
+
+    await box.fill("https://other.example.com/cb");
+    await expect(dialog.getByText("That redirect URI is already registered")).toBeVisible();
+    await expect(save).toBeDisabled();
+
+    await box.fill("https://fixed.example.com/cb");
+    await expect(save).toBeEnabled();
+    await save.click();
+
+    await expect(dialog).toBeHidden();
+    await expect(card.getByRole("cell", { name: "https://fixed.example.com/cb", exact: true })).toBeVisible();
+    await expect(card.getByRole("cell", { name: "https://typo.example.com/cb", exact: true })).toBeHidden();
+    await expect(card.getByRole("cell", { name: "https://other.example.com/cb", exact: true })).toBeVisible();
+  });
+
+  test("row buttons appear only on the row being pointed at", async ({ page }) => {
+    const app = await registerApplication(page, uniqueName("Hover Rows"), "https://hover.example.com/cb");
+    await addUser(page, app.id, "david");
+    const card = await openApplication(page, app.id);
+
+    const row = card.getByRole("row", { name: /david/ });
+    const rename = row.getByRole("button", { name: "Rename" });
+    const shown = () => rename.evaluate((el) => getComputedStyle(el).opacity);
+
+    expect(await shown()).toBe("0");
+    await row.hover();
+    await expect.poll(shown).toBe("1");
+
+    // They stay reachable without a pointer: focusing one brings it back.
+    await page.mouse.move(0, 0);
+    await expect.poll(shown).toBe("0");
+    await rename.focus();
+    await expect.poll(shown).toBe("1");
+  });
+
+  test("the danger zone's arrow turns as it opens", async ({ page }) => {
+    const app = await registerApplication(page, uniqueName("Arrow"), "https://arrow.example.com/cb");
+    const card = await openApplication(page, app.id);
+
+    const danger = card.locator("details.danger-zone");
+    const arrow = danger.locator("summary .app-chevron");
+    const rotation = () => arrow.evaluate((el) => getComputedStyle(el).transform);
+
+    const folded = await rotation();
+    await danger.locator("summary").click();
+    await expect(danger).toHaveJSProperty("open", true);
+    await expect.poll(rotation).not.toBe(folded);
   });
 
   test("deleting an application confirms in a centred dialog first", async ({ page }) => {

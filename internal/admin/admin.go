@@ -137,9 +137,11 @@ func (h *Handler) Register(mux *http.ServeMux) {
 	mux.HandleFunc("POST /admin/applications/{id}/name", h.guardWrite(h.renameApplication))
 	mux.HandleFunc("POST /admin/applications/{id}/secret", h.guardWrite(h.regenerateSecret))
 	mux.HandleFunc("POST /admin/applications/{id}/redirect-uris", h.guardWrite(h.addRedirectURI))
+	mux.HandleFunc("POST /admin/applications/{id}/redirect-uris/edit", h.guardWrite(h.editRedirectURI))
 	mux.HandleFunc("POST /admin/applications/{id}/redirect-uris/remove", h.guardWrite(h.removeRedirectURI))
 	mux.HandleFunc("POST /admin/applications/{id}/delete", h.guardWrite(h.deleteApplication))
 	mux.HandleFunc("POST /admin/applications/{id}/users", h.guardWrite(h.createUser))
+	mux.HandleFunc("POST /admin/applications/{id}/users/{userID}/name", h.guardWrite(h.renameUser))
 	mux.HandleFunc("POST /admin/applications/{id}/users/{userID}/delete", h.guardWrite(h.deleteUser))
 }
 

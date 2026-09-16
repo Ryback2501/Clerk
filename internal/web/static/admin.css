@@ -39,6 +39,7 @@
   --input-border: #CED4DA;
   --row-hover: #eaeaf1;
   --shadow: 0 2px 12px rgba(31, 31, 31, 0.06);
+  --cast-shadow: rgba(31, 31, 31, 0.28);
   --backdrop: rgba(31, 31, 31, 0.45);
 
   --radius-card: 20px;
@@ -74,6 +75,7 @@
     --input-border: #3a3e52;
     --row-hover: #272a3a;
     --shadow: 0 2px 12px rgba(0, 0, 0, 0.35);
+    --cast-shadow: rgba(0, 0, 0, 0.6);
     --backdrop: rgba(0, 0, 0, 0.6);
   }
 }
@@ -283,6 +285,8 @@ code.value { word-break: break-all; user-select: all; }
 .form-group { margin-bottom: 1rem; }
 .form-group label { display: block; margin-bottom: 0.4rem; font-size: 0.875rem; font-weight: 600; }
 .form-text { display: block; margin-top: 0.35rem; font-size: 0.8125rem; color: var(--text-muted); }
+/* An explicit display beats the browser's rule for [hidden], so say it here. */
+.form-text[hidden] { display: none; }
 
 .form-control {
   display: block;
@@ -345,6 +349,27 @@ code.value { word-break: break-all; user-select: all; }
 .table form { margin: 0; }
 .col-action { width: 1%; text-align: right; white-space: nowrap; }
 
+/* A row's own controls appear when it is hovered or holds the focus. They keep
+   their space either way, so nothing shifts as the pointer moves down a table.
+   Fading them rather than hiding them keeps them focusable, so a keyboard can
+   still reach every row action. */
+.row-action {
+  opacity: 0;
+  transition: opacity 0.15s ease;
+}
+tr:hover .row-action,
+tr:focus-within .row-action,
+.row-action:focus-visible {
+  opacity: 1;
+}
+/* The buttons share a wrapper: a table cell must stay a table cell. */
+.row-actions { display: flex; gap: 0.4rem; justify-content: flex-end; }
+
+/* Without a pointer there is no hover to reveal them. */
+@media (hover: none) {
+  .row-action { visibility: visible; opacity: 1; }
+}
+
 /* ---- Application list ---------------------------------------------------- */
 
 /* The cards sit flush against each other, sharing one border between them. */
@@ -354,7 +379,7 @@ code.value { word-break: break-all; user-select: all; }
 .app:not(:last-child) { border-bottom-left-radius: 0; border-bottom-right-radius: 0; }
 
 .app { overflow: hidden; }
-.app[open] { box-shadow: var(--shadow); }
+
 
 .app-summary {
   display: flex;
@@ -376,7 +401,7 @@ code.value { word-break: break-all; user-select: all; }
   transform: rotate(-45deg);
   transition: transform 0.2s ease;
 }
-.app[open] .app-chevron { transform: rotate(45deg); }
+.app[open] > .app-summary .app-chevron { transform: rotate(45deg); }
 
 .app-title { display: flex; flex-direction: column; min-width: 0; flex: 1; }
 .app-name { font-weight: 700; font-size: 1.0625rem; overflow-wrap: anywhere; }
@@ -389,7 +414,16 @@ code.value { word-break: break-all; user-select: all; }
   .app-meta { width: 100%; justify-content: flex-start; padding-left: 1.6rem; }
 }
 
-.app-panel { border-top: 1px solid var(--border); }
+.app-panel {
+  border-top: 1px solid var(--border);
+  /* Cast by this application's own title, sitting above the panel. */
+  box-shadow: inset 0 9px 8px -8px var(--cast-shadow);
+}
+/* And by the title of the application below, when there is one. */
+.app:not(:last-child) > .app-panel {
+  box-shadow: inset 0 9px 8px -8px var(--cast-shadow),
+              inset 0 -9px 8px -8px var(--cast-shadow);
+}
 .panel-host { position: relative; }
 .panel-host:empty { min-height: 5rem; }
 .panel-host > .alert { margin: 1rem 1.5rem; }

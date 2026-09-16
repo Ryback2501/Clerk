@@ -878,3 +878,230 @@ func TestNameCheck(t *testing.T) {
 		t.Errorf("a browser visit returned %d, want a 303 to /admin", rec.Code)
 	}
 }
+
+// Every row can be corrected and removed, and removing asks first. The dialogs
+// are rendered per row, so the values in them stay escaped.
+func TestPanelRowsOfferEditingAndConfirmedRemoval(t *testing.T) {
+	h := newHarness(t)
+	id := h.createApp("Rows", "https://a.example.com/cb")
+	h.createUser(id, "david")
+	users, _ := h.store.ListUsers(context.Background(), id)
+
+	body := h.get(appPath(id)).Body.String()
+	for _, want := range []string{
+		// Several applications can be unfolded at once, so a row's dialog id
+		// has to name its application: the button finds the first match in the
+		// document, which would otherwise belong to another one.
+		`<dialog id="edit-uri-` + itoa(id) + `-1"`,
+		`<dialog id="remove-uri-` + itoa(id) + `-1"`,
+		`<dialog id="rename-user-` + itoa(users[0].ID) + `"`,
+		`<dialog id="delete-user-` + itoa(users[0].ID) + `"`,
+		`value="https://a.example.com/cb"`,
+		`value="david"`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("the panel does not contain %q", want)
+		}
+	}
+
+	// The confirmations name what is about to go.
+	for _, dialog := range []string{`<dialog id="remove-uri-` + itoa(id) + `-1"`, `<dialog id="delete-user-` + itoa(users[0].ID) + `"`} {
+		section := body[strings.Index(body, dialog):]
+		section = section[:strings.Index(section, "</dialog>")]
+		if !strings.Contains(section, "Cancel") {
+			t.Errorf("%s offers no way out", dialog)
+		}
+	}
+}
+
+// The browser disables the add button as a duplicate is typed, so the values it
+// compares against have to be in the page.
+// Two applications unfolded at once must not share a dialog id, or a row
+// button opens — and posts — the other application's dialog.
+func TestRowDialogIdsAreUniquePerApplication(t *testing.T) {
+	h := newHarness(t)
+	first := h.createApp("First", "https://a.example.com/cb")
+	second := h.createApp("Second", "https://b.example.com/cb")
+
+	firstPanel := h.get(appPath(first)).Body.String()
+	secondPanel := h.get(appPath(second)).Body.String()
+
+	for _, id := range []string{`id="edit-uri-`, `id="remove-uri-`} {
+		mine := id + itoa(first) + "-1"
+		theirs := id + itoa(second) + "-1"
+		if !strings.Contains(firstPanel, mine) || !strings.Contains(secondPanel, theirs) {
+			t.Errorf("%s is not scoped to its application", id)
+		}
+		if strings.Contains(secondPanel, mine) {
+			t.Errorf("the second application reuses the first application's %s", id)
+		}
+	}
+}
+
+func TestPanelPresentsTheExistingValuesForTheLiveCheck(t *testing.T) {
+	h := newHarness(t)
+	id := h.createApp("Live", "https://a.example.com/cb")
+	h.createUser(id, "david")
+
+	body := h.get(appPath(id)).Body.String()
+	for _, want := range []string{`data-taken-uri="https://a.example.com/cb"`, `data-taken-username="david"`} {
+		if !strings.Contains(body, want) {
+			t.Errorf("the panel does not publish %q for the duplicate check", want)
+		}
+	}
+	if !strings.Contains(body, `placeholder="John Doe"`) {
+		t.Error("the user box does not use John Doe as its example")
+	}
+	if strings.Contains(body, "Unique within this application") {
+		t.Error("the helper text under the user box is still rendered")
+	}
+}
+
+func TestRenameUser(t *testing.T) {
+	h := newHarness(t)
+	id := h.createApp("App", "https://a.example.com/cb")
+	h.createUser(id, "david")
+	users, _ := h.store.ListUsers(context.Background(), id)
+	before := users[0]
+
+	rec := h.post(appPath(id)+"/users/"+itoa(before.ID)+"/name", url.Values{"username": {"David Jones"}})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("rename returned %d, want 200: %s", rec.Code, rec.Body.String())
+	}
+	body := rec.Body.String()
+	if !strings.Contains(body, "<td>David Jones</td>") {
+		t.Error("the refreshed panel does not show the new name")
+	}
+	// The sub is what a client stores, and a rename must not disturb it.
+	if !strings.Contains(body, before.Sub) {
+		t.Error("the user's sub changed with the name")
+	}
+
+	after, _ := h.store.GetUser(context.Background(), before.ID)
+	if after.Sub != before.Sub {
+		t.Errorf("sub changed from %q to %q", before.Sub, after.Sub)
+	}
+}
+
+func TestRenameUserRejectsADuplicateWithoutLosingIt(t *testing.T) {
+	h := newHarness(t)
+	id := h.createApp("App", "https://a.example.com/cb")
+	h.createUser(id, "david")
+	h.createUser(id, "alice")
+	users, _ := h.store.ListUsers(context.Background(), id)
+
+	rec := h.post(appPath(id)+"/users/"+itoa(users[0].ID)+"/name", url.Values{"username": {"david"}})
+	if rec.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("got %d, want 422", rec.Code)
+	}
+	body := rec.Body.String()
+	if !strings.Contains(body, "already exists") {
+		t.Error("the error does not explain the conflict")
+	}
+	if !strings.Contains(body, `value="david"`) {
+		t.Error("the rejected name was not kept in the dialog")
+	}
+}
+
+func TestRenameUserThroughAnotherApplicationIsNotFound(t *testing.T) {
+	h := newHarness(t)
+	owner := h.createApp("Owner", "https://a.example.com/cb")
+	other := h.createApp("Other", "https://b.example.com/cb")
+	h.createUser(owner, "david")
+	users, _ := h.store.ListUsers(context.Background(), owner)
+
+	rec := h.post(appPath(other)+"/users/"+itoa(users[0].ID)+"/name", url.Values{"username": {"hijacked"}})
+	if rec.Code != http.StatusNotFound {
+		t.Errorf("got %d, want 404", rec.Code)
+	}
+	unchanged, _ := h.store.GetUser(context.Background(), users[0].ID)
+	if unchanged.Username != "david" {
+		t.Error("a user was renamed through an application that does not own them")
+	}
+}
+
+func TestEditRedirectURI(t *testing.T) {
+	h := newHarness(t)
+	id := h.createApp("App", "https://a.example.com/cb", "https://b.example.com/cb")
+	base := appPath(id) + "/redirect-uris/edit"
+
+	rec := h.post(base, url.Values{"original": {"https://a.example.com/cb"}, "uri": {"https://new.example.com/cb"}})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("edit returned %d, want 200: %s", rec.Code, rec.Body.String())
+	}
+	body := rec.Body.String()
+	if !strings.Contains(body, "https://new.example.com/cb") {
+		t.Error("the refreshed panel does not show the new URI")
+	}
+	if strings.Contains(body, ">https://a.example.com/cb<") {
+		t.Error("the panel still lists the replaced URI")
+	}
+	if !strings.Contains(body, "https://b.example.com/cb") {
+		t.Error("editing one URI disturbed another")
+	}
+}
+
+func TestEditRedirectURIRejectsBadValuesWithoutLosingThem(t *testing.T) {
+	h := newHarness(t)
+	id := h.createApp("App", "https://a.example.com/cb", "https://b.example.com/cb")
+	base := appPath(id) + "/redirect-uris/edit"
+
+	for _, tc := range []struct{ name, to, want string }{
+		{"invalid", "not-a-url", "absolute"},
+		{"duplicate", "https://b.example.com/cb", "already"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := h.post(base, url.Values{"original": {"https://a.example.com/cb"}, "uri": {tc.to}})
+			if rec.Code != http.StatusUnprocessableEntity {
+				t.Fatalf("got %d, want 422", rec.Code)
+			}
+			body := rec.Body.String()
+			if !strings.Contains(strings.ToLower(body), tc.want) {
+				t.Errorf("the error does not mention %q", tc.want)
+			}
+			if !strings.Contains(body, `value="`+tc.to+`"`) {
+				t.Error("the rejected value was not kept in the dialog")
+			}
+		})
+	}
+
+	app, _ := h.store.GetApplication(context.Background(), id)
+	if len(app.RedirectURIs) != 2 {
+		t.Errorf("redirect URIs = %v, want the original two", app.RedirectURIs)
+	}
+}
+
+func TestEditUnknownRedirectURIIsNotFound(t *testing.T) {
+	h := newHarness(t)
+	id := h.createApp("App", "https://a.example.com/cb")
+
+	rec := h.post(appPath(id)+"/redirect-uris/edit",
+		url.Values{"original": {"https://gone.example.com/cb"}, "uri": {"https://new.example.com/cb"}})
+	if rec.Code != http.StatusNotFound {
+		t.Errorf("got %d, want 404", rec.Code)
+	}
+}
+
+// A refusal belongs under the field it is about, not in an alert above it, so
+// there is one place a problem is ever reported.
+func TestFieldErrorsRenderUnderTheirField(t *testing.T) {
+	h := newHarness(t)
+	id := h.createApp("App", "https://a.example.com/cb")
+	h.createUser(id, "david")
+
+	for _, tc := range []struct {
+		path string
+		form url.Values
+	}{
+		{appPath(id) + "/redirect-uris", url.Values{"uri": {"not-a-url"}}},
+		{appPath(id) + "/users", url.Values{"username": {"david"}}},
+	} {
+		body := h.post(tc.path, tc.form).Body.String()
+		if strings.Contains(body, `class="alert alert-danger" role="alert"`) {
+			t.Errorf("POST %s reported the problem as an alert above the field", tc.path)
+		}
+		if !strings.Contains(body, `class="field-message"`) {
+			t.Errorf("POST %s does not report the problem under the field", tc.path)
+		}
+	}
+}

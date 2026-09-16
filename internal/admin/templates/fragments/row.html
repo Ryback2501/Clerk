@@ -1,0 +1,30 @@
+{{define "row-form" -}}
+<form class="modal-form" method="post" action="{{.Action}}" data-row-form
+      data-dialog="{{.DialogID}}" data-check="{{.Field}}">
+  <input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
+  <input type="hidden" name="original" value="{{.Original}}">
+  <header class="modal-header">
+    <p class="modal-title" id="{{.DialogID}}-title">{{.Title}}</p>
+  </header>
+  <div class="modal-body">
+    <div class="form-group">
+      <label for="{{.DialogID}}-field">{{.Label}}</label>
+      <input id="{{.DialogID}}-field" class="form-control{{if .Error}} is-invalid{{end}}" type="text"
+             name="{{.Field}}" value="{{.Value}}" data-original="{{.Original}}" required
+             autocomplete="off" autofocus placeholder="{{.Placeholder}}">
+      <!-- Always present, so filling it in cannot resize the dialog. -->
+      <p class="field-message" data-field-message role="alert">{{.Error}}</p>
+    </div>
+  </div>
+  <footer class="modal-footer">
+    <button type="button" class="btn btn-inverse-secondary" commandfor="{{.DialogID}}" command="close">Cancel</button>
+    <button type="submit" class="btn btn-inverse-primary" data-submit disabled>{{.Submit}}</button>
+  </footer>
+</form>
+{{- end}}
+
+{{define "row-dialog" -}}
+<dialog id="{{.DialogID}}" class="modal" aria-labelledby="{{.DialogID}}-title">
+  {{template "row-form" .}}
+</dialog>
+{{- end}}

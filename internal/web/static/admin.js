@@ -230,6 +230,47 @@
     }
   }
 
+  // A panel already lists every redirect URI and user name the application has,
+  // so a duplicate is caught here as it is typed — no request, no waiting. The
+  // server still refuses one on submit; this only saves the round trip.
+  function takenValues(host, field, except) {
+    const values = new Set();
+    for (const row of host.querySelectorAll(`[data-taken-${field}]`)) {
+      const value = row.dataset[field === "uri" ? "takenUri" : "takenUsername"];
+      if (value !== except) values.add(value);
+    }
+    return values;
+  }
+
+  const duplicateMessage = {
+    uri: "That redirect URI is already registered for this application.",
+    username: "A user with that name already exists in this application.",
+  };
+
+  // A form is in the panel it edits, whether it sits in the panel itself or in
+  // one of the dialogs the panel carries.
+  function checkForDuplicate(input) {
+    const form = input.closest("[data-check]");
+    if (!form) return;
+
+    const host = form.closest(".panel-host");
+    const field = form.dataset.check;
+    const message = form.querySelector("[data-field-message]");
+    const hint = form.querySelector("[data-form-hint]");
+    const submit = form.querySelector("[data-submit]");
+    const original = input.dataset.original;
+
+    const value = input.value.trim();
+    const duplicate = value !== "" && takenValues(host, field, original).has(value);
+    // An edit dialog has nothing to save until the value actually changes.
+    const unchanged = original !== undefined && input.value === original;
+
+    message.textContent = duplicate ? duplicateMessage[field] : "";
+    input.classList.toggle("is-invalid", duplicate);
+    if (submit) submit.disabled = duplicate || value === "" || unchanged;
+    if (hint) hint.hidden = duplicate;
+  }
+
   async function submitPanelForm(form, host) {
     const id = host.dataset.app;
     const keepFocus = form.dataset.keepFocus;
@@ -266,6 +307,37 @@
     } finally {
       setBusy(host, false);
       refocus?.focus();
+    }
+  }
+
+  // A row's dialog: on success the whole panel is replaced, which takes the
+  // dialog with it; a refusal comes back as the same form, still open, with the
+  // reason under the field.
+  async function submitRowForm(form, host) {
+    const dialog = form.closest("dialog");
+    setBusy(form, true);
+    try {
+      const response = await post(form);
+      const content = parse(await response.text());
+
+      if (response.ok) {
+        dialog.close();
+        host.replaceChildren(content);
+        syncSummary(host.dataset.app, host);
+        return;
+      }
+      if (response.status === 422) {
+        const fresh = content.querySelector("form");
+        form.replaceWith(fresh);
+        fresh.querySelector("input[data-original]").focus();
+        return;
+      }
+      showDialogError(form, content);
+    } catch (error) {
+      if (error instanceof SignedOut) return;
+      showDialogError(form, alertNode("The change could not be saved. Try again."));
+    } finally {
+      setBusy(form, false);
     }
   }
 
@@ -434,6 +506,8 @@
     event.preventDefault();
     if (form.matches("[data-delete]")) {
       submitDelete(form, host);
+    } else if (form.matches("[data-row-form]")) {
+      submitRowForm(form, host);
     } else {
       submitPanelForm(form, host);
     }
@@ -441,10 +515,24 @@
 
   document.addEventListener("input", (event) => {
     const input = event.target;
-    if (input instanceof HTMLInputElement && input.name === "name" && input.closest("[data-name-form]")) {
+    if (!(input instanceof HTMLInputElement)) return;
+    if (input.name === "name" && input.closest("[data-name-form]")) {
       checkNameSoon(input);
+    } else if (input.closest("[data-check]")) {
+      checkForDuplicate(input);
     }
   });
+
+  // A dialog that was cancelled reopens holding the row's own value again, and
+  // a freshly rendered panel starts with its buttons in the right state.
+  document.addEventListener("close", (event) => {
+    const dialog = event.target;
+    if (!(dialog instanceof HTMLDialogElement)) return;
+    const input = dialog.querySelector("[data-check] input[data-original]");
+    if (!input) return;
+    input.value = input.dataset.original;
+    checkForDuplicate(input);
+  }, true);
 
   document.addEventListener("close", (event) => {
     if (event.target instanceof HTMLDialogElement) resetNameForm(event.target);

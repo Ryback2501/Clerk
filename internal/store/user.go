@@ -133,6 +133,33 @@ func (s *Store) getUser(ctx context.Context, query string, arg any) (*User, erro
 	return &u, nil
 }
 
+// RenameUser changes a test identity's display name. Its sub is deliberately
+// left alone: that is the identifier already issued in ID tokens and stored by
+// the client, so renaming must not be the same thing as deleting the user and
+// creating a replacement.
+func (s *Store) RenameUser(ctx context.Context, id int64, username string) error {
+	// Checking first turns an unknown id into ErrNotFound rather than a silent
+	// no-op, and reports it before any validation message.
+	if _, err := s.GetUser(ctx, id); err != nil {
+		return err
+	}
+
+	username = strings.TrimSpace(username)
+	if err := validateUsername(username); err != nil {
+		return err
+	}
+
+	res, err := s.db.ExecContext(ctx,
+		`UPDATE users SET username = ? WHERE id = ?`, username, id)
+	if err != nil {
+		if isDuplicateUsername(err) {
+			return invalidf("a user named %q already exists in this application", username)
+		}
+		return fmt.Errorf("rename user: %w", err)
+	}
+	return expectOneRow(res, "user")
+}
+
 // DeleteUser removes one test identity. It affects nothing else: not the
 // application, not any other user.
 func (s *Store) DeleteUser(ctx context.Context, id int64) error {
