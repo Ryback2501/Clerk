@@ -1,192 +1,349 @@
 # Clerk
-An Identity Provider (IdP) for testing and development environments to generate and manage users for testing purposes and an easy and fast login system.
 
-## Running it
+Clerk is a small sign-in service (an OpenID Connect **identity provider**) for
+development and testing.
 
-Clerk is configured entirely through environment variables (see [Configuration](#configuration)).
-Administration always requires signing in, so besides `ISSUER` it needs Bouncer and at
-least one sign-in provider — see [Administration access](#administration-access).
-Keep them in a dedicated env file, e.g. `clerk.env` (no quotes around values):
+Your application connects to Clerk in the same way it connects to Google or Microsoft.
+The difference is the sign-in page: there are no passwords. The user picks a test user
+from a list and presses **Login**. With Clerk, you can test your application's sign-in
+without creating real accounts.
 
-```dotenv
-ISSUER=http://localhost:8080
-BOUNCER_URL=http://host.docker.internal:3000
-BOUNCER_API_KEY=bncr_...
-GOOGLE_CLIENT_ID=...
-GOOGLE_CLIENT_SECRET=...
-```
+**Clerk is not for real users.** Anyone who can open the sign-in page can sign in as any
+test user.
 
-### With Docker
+How it works:
 
-```bash
-docker run -d --name clerk \
-  --env-file clerk.env \
-  --add-host=host.docker.internal:host-gateway \
-  -v clerk-data:/data \
-  -v clerk-keys:/keys \
-  -p 8080:8080 \
-  ryback2501/clerk:latest
-```
+- **The sign-in protocol is real.** Clerk uses the standard Authorization Code flow,
+  signed ID tokens (RS256), discovery and JWKS. Your application's normal OpenID Connect
+  library works with it.
+- **The users are fake.** You create test users in Clerk's admin page. They have no
+  passwords.
+- **The admin page is protected.** Administrators sign in with Google, GitHub,
+  Microsoft or LinkedIn. Then [Bouncer](https://github.com/Ryback2501/Bouncer) checks
+  that they have the right role.
 
-Inside the container `localhost` is the container itself, so a Bouncer running on your
-machine is reached as `host.docker.internal` (which `--add-host` makes resolvable on
-Linux); a Bouncer in another container is reached by its name on a shared Docker network.
-The image has a built-in healthcheck, so `docker ps` reports the container as healthy
-once it is serving.
+## Run Clerk
 
-### From source
+To try Clerk quickly, without accounts or keys, see
+[Try Clerk without credentials](#try-clerk-without-credentials).
 
-```bash
-set -a; source clerk.env; set +a
-export BOUNCER_URL=http://localhost:3000   # no container in between
-export DB_PATH=./data/clerk.db KEYS_PATH=./keys/signing.pem
-mkdir -p data keys
-go run ./cmd/clerk
-```
+To run Clerk for real, follow these steps in order:
 
-The default database and key paths are container paths, hence the overrides.
+1. [Set up an admin sign-in provider](#set-up-an-admin-sign-in-provider) (Google,
+   GitHub, Microsoft or LinkedIn).
+2. [Set up Clerk in Bouncer](#set-up-clerk-in-bouncer).
+3. Write the settings in a `.env` file. See [Configuration](#configuration).
+4. Start Clerk with [Docker](#docker) or [from source](#from-source).
+5. Open `<ISSUER>/admin` (for example <http://localhost:8080/admin>) and sign in.
+6. Register your application and connect it to Clerk. See
+   [Use Clerk as an identity provider](#use-clerk-as-an-identity-provider).
 
-### Trying it without credentials
+Clerk checks every setting when it starts. If something is wrong or missing, it stops
+and lists all the problems together. It also contacts each admin sign-in provider when
+it starts. If it cannot reach one, it stops.
 
-`e2e/stack.sh` runs Clerk from source next to a mock sign-in provider and a Bouncer stub
-that make you an administrator — the same stack the end-to-end tests use:
+### Try Clerk without credentials
 
-```bash
-e2e/stack.sh up     # then open http://localhost:8080/admin and sign in with "google"
-e2e/stack.sh down
-```
+The script `e2e/stack.sh` starts Clerk together with a fake sign-in provider and a fake
+Bouncer. The fake Bouncer makes you an administrator. You do not need any accounts or
+keys.
 
-It uses host networking, so the browser and Clerk see the mock provider at the same
-address, and ports 8080–8082 must be free. It works as-is on Linux; Docker Desktop on
-macOS or Windows needs host networking enabled in its settings.
+You need Docker and `curl`. Ports 8080, 8081 and 8082 must be free.
 
-In every case, open <http://localhost:8080/admin> to register an application, then
-connect your application as described in [Using Clerk as an identity provider](#using-clerk-as-an-identity-provider).
+1. From the project folder, start everything:
+
+   ```bash
+   e2e/stack.sh up
+   ```
+
+2. Wait until the script says `clerk is ready`.
+3. Open <http://localhost:8080/admin>.
+4. Click **Continue with Google**. You are signed in immediately.
+5. When you finish, stop and remove everything, including the data:
+
+   ```bash
+   e2e/stack.sh down
+   ```
+
+To see the logs, run `e2e/stack.sh logs`.
+
+The containers use host networking. This works as it is on Linux. With Docker Desktop
+on macOS or Windows, turn on host networking in the Docker Desktop settings first.
+
+### Set up an admin sign-in provider
+
+Administrators sign in to Clerk with an external account. You need at least one
+provider.
+
+1. At the provider (Google, GitHub, Microsoft or LinkedIn), create an OAuth application
+   for Clerk.
+2. Add this **redirect URL** (also called *callback URL*) to that application. It must
+   match exactly:
+
+   ```text
+   <ISSUER>/admin/auth/<provider>/callback
+   ```
+
+   For example: `https://clerk.example.com/admin/auth/google/callback`.
+   `<provider>` is `google`, `github`, `microsoft` or `linkedin`.
+3. Copy the **client ID** and the **client secret** into your settings (table below).
+4. When Clerk starts, it writes each callback URL to its log. You can copy it from
+   there.
+
+You can enable more than one provider. Each provider you enable needs both its ID and
+its secret.
+
+| Setting | Required | What it is |
+|---|---|---|
+| `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET` | At least one provider | Google OAuth application |
+| `GITHUB_CLIENT_ID`, `GITHUB_CLIENT_SECRET` | At least one provider | GitHub OAuth application |
+| `MICROSOFT_CLIENT_ID`, `MICROSOFT_CLIENT_SECRET` | At least one provider | Microsoft (Entra ID) application |
+| `LINKEDIN_CLIENT_ID`, `LINKEDIN_CLIENT_SECRET` | At least one provider | LinkedIn application |
+| `GOOGLE_ISSUER`, `MICROSOFT_ISSUER`, `LINKEDIN_ISSUER` | No | Replaces the provider's default issuer address. You only need it for a **single-tenant** Microsoft application: `MICROSOFT_ISSUER=https://login.microsoftonline.com/<tenant-id>/v2.0`. GitHub has no issuer. |
+
+### Set up Clerk in Bouncer
+
+After an administrator signs in, Clerk asks Bouncer if that person has the required
+role. Bouncer does not send the browser back to Clerk, so **Clerk does not need a
+redirect URI in Bouncer**.
+
+1. In Bouncer, create an application for Clerk.
+2. In that application, create a role with the customId `admin`.
+3. Create an API key for the application. It starts with `bncr_`.
+4. Give yourself the `admin` role. Use the **same provider** (for example, Google)
+   that you will use to sign in to Clerk.
+5. Put Bouncer's address and the API key in your settings (table below).
+
+| Setting | Required | Default | What it is |
+|---|---|---|---|
+| `BOUNCER_URL` | Yes | — | The address where Clerk can reach Bouncer, for example `http://bouncer:3000` |
+| `BOUNCER_API_KEY` | Yes | — | The `bncr_…` API key from step 3 |
+| `BOUNCER_REQUIRED_ROLE` | No | `admin` | The customId of the role an administrator must have. It is case-sensitive. If you leave it empty, Clerk uses `admin`. |
+
+Good to know:
+
+- **If Bouncer is down, only the admin page stops working.** It shows an error (503)
+  that explains the cause. Sign-in for your applications keeps working.
+- **Bouncer and Clerk must use the same user ID.** Clerk sends the ID that Bouncer saved
+  for you. It is not the same field for every provider. For example, Microsoft uses
+  `oid`. Clerk handles this for you. It only matters if Bouncer answers
+  `user_not_found`.
 
 ### Configuration
 
-| Variable | Default | Meaning |
-|---|---|---|
-| `ISSUER` | *(required)* | Public base URL of the provider. Published as `issuer` and as the `iss` claim, so it must match what clients are configured with exactly. |
-| `LISTEN_ADDR` | `:8080` | Address to listen on. |
-| `DB_PATH` | `/data/clerk.db` | SQLite database path. |
-| `KEYS_PATH` | `/keys/signing.pem` | RS256 signing key path. Generated on first run and never regenerated. |
-| `CODE_TTL` | `1m` | Authorization code lifetime. |
-| `ACCESS_TOKEN_TTL` | `1h` | Access token lifetime. |
-| `ID_TOKEN_TTL` | `1h` | ID token lifetime. |
+Clerk reads all its settings from **environment variables**. There are no
+configuration files inside Clerk. You can give Clerk the settings in several ways.
 
-### Administration access
+**A `.env` file (recommended).** Copy the example file and fill in the values:
 
-Administrators sign in with an external OAuth provider, and whether they may
-administer this provider is then decided by [Bouncer](https://github.com/Ryback2501/Bouncer).
-Clerk refuses to start unless this is configured: there is no unauthenticated mode.
-
-| Variable | Meaning |
-|---|---|
-| `BOUNCER_URL` | Where Bouncer is reachable, e.g. `http://bouncer:3000`. |
-| `BOUNCER_API_KEY` | The `bncr_…` key Bouncer issued for Clerk's application. |
-| `BOUNCER_REQUIRED_ROLE` | Role `customId` an administrator must hold. Default `admin`; empty accepts any active role. |
-| `GOOGLE_CLIENT_ID` / `_SECRET` | Google OAuth credentials. |
-| `GITHUB_CLIENT_ID` / `_SECRET` | GitHub OAuth credentials. |
-| `MICROSOFT_CLIENT_ID` / `_SECRET` | Microsoft OAuth credentials. |
-| `LINKEDIN_CLIENT_ID` / `_SECRET` | LinkedIn OAuth credentials. |
-| `<PROVIDER>_ISSUER` | Overrides that provider's OIDC issuer. Microsoft **single-tenant** applications need `MICROSOFT_ISSUER=https://login.microsoftonline.com/<tenant-id>/v2.0`; the default is the multi-tenant endpoint and a single-tenant app's tokens would not validate against it. |
-
-At least one provider is required. Register this callback with each one, exactly:
-
-```text
-<ISSUER>/admin/auth/<provider>/callback
+```bash
+cp .env.example .env
 ```
 
-Clerk logs each callback URL at startup so it can be copied verbatim.
+In this file, write one `KEY=value` per line, with no quotes and no spaces around `=`.
+Lines that start with `#` are comments. Never commit your `.env` file: it contains
+secrets. Git already ignores it.
 
-#### Setting up Bouncer
+**Docker, using the `.env` file:**
 
-1. In Bouncer, register an application for Clerk and create the `admin` role.
-2. Issue an API key for it and set it as `BOUNCER_API_KEY`.
-3. Assign yourself that role, using the same provider you will sign in to Clerk with.
+```bash
+docker run --env-file .env ... ryback2501/clerk:latest
+```
 
-The subject Clerk sends is the identifier Bouncer recorded for you, which is **not**
-the same claim for every provider — Microsoft in particular is matched on `oid`, since
-its `sub` is issued per-client and would never match. Clerk handles this per provider;
-it matters only if you are debugging a `user_not_found` response.
+**Docker, with each setting in the command:**
 
-**A Bouncer outage closes administration and nothing else.** The OIDC endpoints keep
-issuing tokens normally, which is verified by a test that runs the full flow with the
-role service unreachable.
+```bash
+docker run -e ISSUER=http://localhost:8080 -e BOUNCER_URL=... ... ryback2501/clerk:latest
+```
 
-### Volumes
+You can use both. A `-e` value replaces the same key from `--env-file`.
 
-Both must persist, or every client breaks on restart:
+**Docker Compose:**
 
-- `/data` — the SQLite database.
-- `/keys` — the RS256 signing key. A new key would invalidate every token ever issued.
+```yaml
+services:
+  clerk:
+    image: ryback2501/clerk:latest
+    env_file: .env            # all settings from the file
+    environment:              # or here, one by one (this wins over env_file)
+      ISSUER: http://localhost:8080
+    ports:
+      - "8080:8080"
+    volumes:
+      - clerk-data:/data
+      - clerk-keys:/keys
 
-The container runs as uid 65532 and does not terminate TLS; put a reverse proxy in front
-of it and forward the full path.
+volumes:
+  clerk-data:
+  clerk-keys:
+```
 
-## Using Clerk as an identity provider
+**From source (without Docker):** load the file into your shell before you start
+Clerk:
 
-A third-party application talks to Clerk exactly as it would to Google or Microsoft:
-standard OpenID Connect, Authorization Code flow, RS256-signed ID tokens. Only the
-sign-in screen differs — the user picks a test identity instead of entering a password.
-The full HTTP interface is described in [`docs/openapi.yaml`](docs/openapi.yaml).
+```bash
+set -a; source .env; set +a
+```
+
+All settings:
+
+| Setting | Required | Default | What it is |
+|---|---|---|---|
+| `ISSUER` | Yes | — | The public address of Clerk, for example `https://clerk.example.com`. Applications must use exactly this value. It must start with `http://` or `https://`, and it cannot have `?query` or `#fragment`. A slash at the end is removed. |
+| `BOUNCER_URL` | Yes | — | See [Set up Clerk in Bouncer](#set-up-clerk-in-bouncer) |
+| `BOUNCER_API_KEY` | Yes | — | See [Set up Clerk in Bouncer](#set-up-clerk-in-bouncer) |
+| `BOUNCER_REQUIRED_ROLE` | No | `admin` | See [Set up Clerk in Bouncer](#set-up-clerk-in-bouncer) |
+| `<PROVIDER>_CLIENT_ID`, `<PROVIDER>_CLIENT_SECRET` | At least one provider | — | See [Set up an admin sign-in provider](#set-up-an-admin-sign-in-provider) |
+| `<PROVIDER>_ISSUER` | No | The provider's own | See [Set up an admin sign-in provider](#set-up-an-admin-sign-in-provider) |
+| `LISTEN_ADDR` | No | `:8080` | The address and port Clerk listens on |
+| `DB_PATH` | No | `/data/clerk.db` | Where Clerk saves its database (SQLite) |
+| `KEYS_PATH` | No | `/keys/signing.pem` | Where Clerk saves its signing key. Clerk creates the key the first time it starts and never replaces it. |
+| `CODE_TTL` | No | `1m` | How long a sign-in code is valid |
+| `ACCESS_TOKEN_TTL` | No | `1h` | How long an access token is valid |
+| `ID_TOKEN_TTL` | No | `1h` | How long an ID token is valid |
+
+Write durations with a number and a unit, for example `30s`, `5m` or `1h`. The minimum is
+`1s`.
+
+### Docker
+
+The image is `ryback2501/clerk` on Docker Hub. It has a version tag (for example
+`:0.1.0`) and `:latest`.
+
+1. Create your `.env` file (see [Configuration](#configuration)).
+2. Start Clerk:
+
+   ```bash
+   docker run -d --name clerk \
+     --env-file .env \
+     --add-host=host.docker.internal:host-gateway \
+     -v clerk-data:/data \
+     -v clerk-keys:/keys \
+     -p 8080:8080 \
+     ryback2501/clerk:latest
+   ```
+
+3. Wait until `docker ps` shows the container as `healthy`. The image checks its own
+   `/health` address.
+4. Open <http://localhost:8080/admin>.
+
+**Reaching Bouncer from the container.** Inside a container, `localhost` means the
+container itself, not your computer.
+
+- If Bouncer runs on your computer, use `BOUNCER_URL=http://host.docker.internal:3000`.
+  The `--add-host` option makes this name work on Linux.
+- If Bouncer runs in another container, put both containers on the same Docker network
+  and use the container name, for example `http://bouncer:3000`.
+
+**HTTPS.** Clerk does not handle HTTPS itself. In production, put a reverse proxy (for
+example nginx, Caddy or Traefik) in front of it. The proxy must forward the full path.
+Set `ISSUER` to the public `https://` address.
+
+#### Volumes
+
+Clerk saves two things. Both must survive a restart, so both folders need a volume:
+
+| Folder | What it contains | If you lose it |
+|---|---|---|
+| `/data` | The database: applications, redirect URIs and test users | You must register everything again |
+| `/keys` | The signing key | Every token Clerk has issued stops being valid |
+
+The container runs as user ID `65532`. Named volumes (like `clerk-data` above) work
+without changes. If you use a folder from your computer instead (a bind mount), user
+`65532` must be able to write to it.
+
+### From source
+
+You need Go 1.27.
+
+1. Create your `.env` file (see [Configuration](#configuration)).
+2. Load it and start Clerk:
+
+   ```bash
+   set -a; source .env; set +a
+   export BOUNCER_URL=http://localhost:3000
+   export DB_PATH=./data/clerk.db KEYS_PATH=./keys/signing.pem
+   mkdir -p data keys
+   go run ./cmd/clerk
+   ```
+
+3. Open <http://localhost:8080/admin>.
+
+Why the extra lines: without Docker, Bouncer is at `localhost`, not at
+`host.docker.internal`. The default database and key paths are for the container, so
+you point them to local folders.
+
+## Use Clerk as an identity provider
+
+Your application connects to Clerk with standard OpenID Connect (Authorization Code flow,
+RS256-signed ID tokens), in the same way it connects to Google or Microsoft. Only the
+sign-in page is different. The complete HTTP description is in
+[`docs/openapi.yaml`](docs/openapi.yaml).
 
 ### 1. Register the application
 
-In the admin interface (`<ISSUER>/admin`):
+Everything happens on one page: `<ISSUER>/admin`. Each application is a card. Click it
+to open it and see its credentials, redirect URIs, test users and the danger zone.
 
-Everything happens on that one page: each application is a card that unfolds to show its
-credentials, redirect URIs, test users and a danger zone.
+1. Click **Register application** (below the list) and write a name. Names must be
+   unique. The dialog tells you while you type if the name is already used.
+2. Clerk shows the **client secret** in a dialog, **only once**. Click it to copy it,
+   then close the dialog. Clerk keeps only a hash, so it cannot show the secret again.
+   If you lose it, click **Regenerate client secret**. This creates a new secret and the
+   old one stops working. The **client ID** is not secret. You can always see it under
+   Credentials.
+3. **Add a redirect URI.** This is the address in your application where Clerk sends the
+   user after sign-in. It must start with `http://` or `https://`, have a host, and have
+   no `#fragment`. Clerk compares it **exactly**: a different port, path or slash at the
+   end is refused.
+4. **Add test users.** These are the names shown on the sign-in page. An application
+   without users cannot sign anyone in.
 
-1. **Register application** (below the list) and give it a name. Names are unique, and the
-   dialog says so while you type. The new application appears unfolded, ready to set up.
-2. The **client secret** appears in a dialog, once. Click it to copy it, then close the
-   dialog — Clerk keeps only a hash and cannot show it again. If it is lost, **Regenerate
-   client secret** issues a new one, invalidating the old one, and shows it the same way.
-   The **client ID** is not secret and stays under Credentials.
-3. **Add a redirect URI**. Each must be an absolute `http` or `https` URL with a host and
-   no `#fragment`, and is matched **exactly** at sign-in — a different port, path or
-   trailing slash is refused.
-4. **Add test users**. These are the identities offered on the sign-in screen. An
-   application with no users cannot sign anyone in.
+Later changes:
 
-**Rename**, at the top of an unfolded application, changes only its label: the client ID,
-secret, redirect URIs and users stay as they are.
-
-Each redirect URI and test user can be corrected in place — the controls appear on the row
-you point at — and removing one asks first. Renaming a test user **keeps its `sub`**, so a
-client that already knows that identity still recognises it; deleting the user and adding
-the name again would issue a new one.
+- **Rename** (at the top of an open application) changes only the name. The client ID,
+  secret, redirect URIs and users stay the same.
+- To edit or remove a redirect URI or a test user, point at its row. The buttons appear
+  there. Clerk asks before it removes anything.
+- **Renaming a test user keeps its `sub`** (its user ID), so your application still
+  recognizes the user. If you delete a user and create it again with the same name, it
+  gets a new `sub`, and your application sees a new user.
+- **Delete application** (in the danger zone) removes the application and all its test
+  users.
 
 ### 2. Configure the client
 
-Most OIDC libraries need only these settings:
+Most OpenID Connect libraries only need these settings:
 
 | Setting | Value |
 |---|---|
-| Issuer / authority | `<ISSUER>`, e.g. `http://localhost:8080` |
+| Issuer / authority | `<ISSUER>`, for example `http://localhost:8080` |
 | Discovery URL | `<ISSUER>/.well-known/openid-configuration` |
-| Client ID / secret | From registration |
+| Client ID and secret | From step 1 |
 | Client authentication | `client_secret_basic` (HTTP Basic) or `client_secret_post` (form fields) |
 | Response type / flow | `code` (Authorization Code) |
 | Scopes | `openid profile` |
-| PKCE | Optional; `S256` only. Recommended. |
-| Redirect URI | One of the registered URIs, exactly |
+| PKCE | Optional, `S256` only. Recommended. |
+| Redirect URI | One of the registered redirect URIs, exactly |
 
-The endpoints, all relative to the issuer, are advertised by discovery:
+The library finds the endpoints through discovery. All of them are relative to the issuer:
 
-| Endpoint | Purpose |
+| Endpoint | What it does |
 |---|---|
-| `GET /.well-known/openid-configuration` | Provider metadata |
-| `GET /jwks` | Public key for verifying ID tokens |
-| `GET /authorize` | Where the browser is sent to sign in |
-| `POST /token` | Exchanges the code for tokens (server-to-server) |
-| `GET` / `POST /userinfo` | Claims for an access token |
+| `GET /.well-known/openid-configuration` | Describes the provider (discovery) |
+| `GET /jwks` | The public key to check ID token signatures |
+| `GET /authorize` | The sign-in page. The browser goes here. |
+| `POST /token` | Changes the code into tokens. Your server calls it. |
+| `GET` or `POST /userinfo` | Returns the user's claims for an access token |
+| `GET /health` | Returns `{"status":"ok"}` when Clerk is running |
 
-### 3. The flow
+### 3. The sign-in flow
 
-1. **Send the browser to `/authorize`** (one URL, wrapped here for readability):
+Your OpenID Connect library usually does all these steps for you. They are here so you
+can understand and debug the flow.
+
+1. **Send the browser to `/authorize`.** This is one URL. It is split into lines here so
+   it is easier to read:
 
    ```text
    http://localhost:8080/authorize?response_type=code
@@ -199,22 +356,21 @@ The endpoints, all relative to the issuer, are advertised by discovery:
      &code_challenge_method=S256
    ```
 
-   `scope` must include `openid`; other scopes such as `email` are ignored rather than
-   rejected. If `client_id` or `redirect_uri` is wrong, Clerk shows an error page and
-   does **not** redirect; the same goes for an application with no test users, which
-   gets a page saying so. Other problems with the request are sent back to the redirect
-   URI as `?error=...&error_description=...&state=...`.
+   If `client_id` or `redirect_uri` is wrong, Clerk shows an error page and does **not**
+   redirect. It also shows a page if the application has no test users. For other
+   problems, Clerk redirects to the redirect URI with
+   `?error=...&error_description=...&state=...`.
 
-2. **The user picks a test identity and presses Login.** Clerk redirects to:
+2. **The user picks a test user and presses Login.** Clerk redirects to:
 
    ```text
    https://app.example.com/callback?code=<code>&state=<state>
    ```
 
-   Check that `state` matches what you sent. The code is single-use and expires after
-   one minute by default.
+   Check that `state` is the same value you sent. You can use the code only once. It
+   expires after one minute by default (`CODE_TTL`).
 
-3. **Exchange the code** from your server:
+3. **Change the code into tokens.** Do this from your server:
 
    ```bash
    curl -u '<client-id>:<client-secret>' http://localhost:8080/token \
@@ -224,8 +380,8 @@ The endpoints, all relative to the issuer, are advertised by discovery:
      -d code_verifier='<verifier>'
    ```
 
-   `redirect_uri` must be the same one used in step 1, and `code_verifier` is required
-   exactly when a `code_challenge` was sent. The response:
+   `redirect_uri` must be the same as in step 1. Send `code_verifier` only if you sent a
+   `code_challenge` in step 1 (then it is required). The answer:
 
    ```json
    {
@@ -237,12 +393,15 @@ The endpoints, all relative to the issuer, are advertised by discovery:
    }
    ```
 
-4. **Verify the ID token** before trusting it: check the RS256 signature with the key
-   from `/jwks` whose `kid` matches the token header, then check that `iss` equals the
-   issuer, `aud` equals your client ID, `exp` is in the future, and `nonce` equals the
-   one you sent.
+4. **Check the ID token before you trust it.**
+   - The signature is valid (RS256), using the key from `/jwks` with the same `kid` as
+     the token header.
+   - `iss` is the issuer.
+   - `aud` is your client ID.
+   - `exp` is in the future.
+   - `nonce` is the value you sent.
 
-5. **Optionally call `/userinfo`:**
+5. **Optional: call `/userinfo`.**
 
    ```bash
    curl -H 'Authorization: Bearer <access-token>' http://localhost:8080/userinfo
@@ -254,49 +413,60 @@ The endpoints, all relative to the issuer, are advertised by discovery:
 
 ### Claims and tokens
 
-| Claim | In ID token | In `/userinfo` | Value |
+| Claim | In the ID token | In `/userinfo` | Value |
 |---|---|---|---|
-| `iss` | always | — | The issuer |
-| `sub` | always | always | The test user's subject |
-| `aud` | always | — | Your client ID |
-| `iat`, `exp` | always | — | Issued-at and expiry, in seconds since the epoch |
-| `nonce` | if sent to `/authorize` | — | The nonce you sent |
-| `name` | with `profile` | with `profile` | The test user's username |
+| `iss` | Always | — | The issuer |
+| `sub` | Always | Always | The test user's ID |
+| `aud` | Always | — | Your client ID |
+| `iat`, `exp` | Always | — | When the token was created and when it expires (seconds since 1970) |
+| `nonce` | If you sent one to `/authorize` | — | The nonce you sent |
+| `name` | With the `profile` scope | With the `profile` scope | The test user's name |
 
-- **`sub`** is random, stable for the user's lifetime, and never derived from the
-  username. The same username in two applications is two different users with two
-  different subjects, so key accounts on `sub`, not `name`.
-- **The access token** is an opaque string, not a JWT. Its only use is `/userinfo`.
-- **Lifetimes** default to one minute for codes and one hour for access and ID tokens;
-  see `CODE_TTL`, `ACCESS_TOKEN_TTL` and `ID_TOKEN_TTL` under [Configuration](#configuration).
-- **No refresh tokens.** When the tokens expire, send the user through `/authorize`
-  again; they only have to pick an identity.
+- **`sub`** is random. It never changes for the life of the user, and it does not come
+  from the name. The same name in two applications is two different users with two
+  different `sub` values. Identify users by `sub`, not by `name`.
+- **The access token** is a random string, not a JWT. You can only use it with
+  `/userinfo`.
+- **Lifetimes:** codes are valid for one minute, access and ID tokens for one hour. You
+  can change this with `CODE_TTL`, `ACCESS_TOKEN_TTL` and `ID_TOKEN_TTL` (see
+  [Configuration](#configuration)).
+- **There are no refresh tokens.** When the tokens expire, send the user to `/authorize`
+  again. The user only has to pick a name.
 
-### Errors worth knowing
+### Common errors
 
-| Symptom | Cause |
+| What you see | Why |
 |---|---|
-| "Invalid redirect URI" page, no redirect | The `redirect_uri` is not registered exactly as sent |
-| "No test users" page | The application has no users yet |
-| `invalid_grant` from `/token` | The code expired, was already used, was issued to another client, or `redirect_uri`/`code_verifier` does not match |
-| `invalid_client` (401) from `/token` | Wrong client ID or secret |
+| "Invalid redirect URI" page, no redirect | The `redirect_uri` is not registered exactly as you sent it |
+| "No test users" page | The application has no test users yet |
+| `invalid_grant` from `/token` | The code expired, was already used, or belongs to another client. Or `redirect_uri` or `code_verifier` does not match. |
+| `invalid_client` (401) from `/token` | Wrong client ID or client secret |
 | `invalid_token` (401) from `/userinfo` | The access token is unknown or expired |
 
-A code presented a second time is treated as intercepted: the exchange is refused and
-the access token issued from its first use is revoked. The ID token from that first use
-cannot be revoked and stays valid until it expires.
+If someone uses the same code twice, Clerk assumes it was stolen. It refuses the second
+exchange and cancels the access token from the first one. The ID token from the first
+exchange cannot be cancelled. It stays valid until it expires.
 
 ### Not supported
 
-Implicit and hybrid flows, refresh tokens, the `email` scope and claims, logout and
-token revocation endpoints, and dynamic client registration. Clients must be registered
-through the admin interface.
+- Implicit and hybrid flows
+- Refresh tokens
+- The `email` scope and email claims
+- Logout and token revocation endpoints
+- Dynamic client registration. You register applications only in the admin page.
 
 ## Status
 
-The OpenID Connect provider is complete: discovery, JWKS, the Authorization Code flow
-with PKCE, RS256 ID tokens, and UserInfo. Administration is authenticated with external
-OAuth and authorized by Bouncer.
+Clerk is complete for its purpose:
 
-Not implemented, deliberately: refresh tokens, an admin REST API, and anything else in
-the out-of-scope list this project was specified with.
+- **Sign-in service:** discovery, JWKS, the Authorization Code flow with PKCE, RS256 ID
+  tokens and UserInfo.
+- **Admin page:** register, rename and delete applications; create and regenerate client
+  secrets; add, edit and remove redirect URIs and test users.
+- **Admin access:** sign-in with Google, GitHub, Microsoft or LinkedIn, and a role check
+  in Bouncer.
+
+These are not implemented, on purpose: refresh tokens, logout, token revocation, the
+`email` scope, dynamic client registration and an admin REST API. There is also no rate
+limiting, so do not expose Clerk to the public internet without protection in front of
+it.

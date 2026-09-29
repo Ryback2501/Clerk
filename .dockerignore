@@ -13,6 +13,7 @@ e2e
 *.pem
 .env
 .env.local
+.env.example
 coverage.out
 *.test
 README.md
