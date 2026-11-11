@@ -134,7 +134,17 @@ func TestSignInStartOfAnUnconfiguredProviderIsNotFound(t *testing.T) {
 
 func TestProviderRefusalLandsOnSignInWithTheRefusedMessage(t *testing.T) {
 	site := newSignInSite(t)
-	resp := site.get(t, "/admin/auth/google/callback?error=access_denied&state=anything")
+	// A real sign-in, refused by the provider on the way back: the callback
+	// carries the real state but an error instead of a code.
+	callback, err := url.Parse(site.reachCallback(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	callback.RawQuery = url.Values{
+		"error": {"access_denied"},
+		"state": {callback.Query().Get("state")},
+	}.Encode()
+	resp := site.do(t, http.MethodGet, callback.String(), nil, nil)
 	readAll(t, resp)
 
 	site.expectSignInPageWith(t, resp, "The provider did not complete the sign-in.")

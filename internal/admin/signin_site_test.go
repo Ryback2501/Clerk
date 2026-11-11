@@ -28,6 +28,7 @@ import (
 type signInSite struct {
 	URL      string
 	client   *http.Client
+	db       *store.Store
 	sessions *SessionStore
 	bouncer  *fakeBouncer
 }
@@ -110,6 +111,7 @@ func newSignInSite(t *testing.T) *signInSite {
 				return http.ErrUseLastResponse
 			},
 		},
+		db:       db,
 		sessions: sessions,
 		bouncer:  bouncer,
 	}
@@ -118,6 +120,13 @@ func newSignInSite(t *testing.T) *signInSite {
 // signIn goes through the stand-in Google as a browser would, and returns
 // Clerk's answer to the provider's callback.
 func (s *signInSite) signIn(t *testing.T) *http.Response {
+	t.Helper()
+	return s.do(t, http.MethodGet, s.reachCallback(t), nil, nil)
+}
+
+// reachCallback starts a real sign-in and returns the callback address the
+// provider sends the browser back to, carrying the code and the real state.
+func (s *signInSite) reachCallback(t *testing.T) string {
 	t.Helper()
 	start := s.get(t, "/admin/auth/google/start")
 	readAll(t, start)
@@ -131,7 +140,7 @@ func (s *signInSite) signIn(t *testing.T) *http.Response {
 	if !strings.HasPrefix(callback, s.URL+"/admin/auth/google/callback") {
 		t.Fatalf("the provider sent the browser to %q, want the callback", callback)
 	}
-	return s.do(t, http.MethodGet, callback, nil, nil)
+	return callback
 }
 
 // signInOK signs in and expects it to succeed.
@@ -195,10 +204,17 @@ func (s *signInSite) expectSignInPageWith(t *testing.T, resp *http.Response, mes
 	}
 }
 
-// expectNoSession checks the answer set no session cookie and the browser
-// holds none.
+// expectNoSession checks the answer set no session cookie, the browser holds
+// none, and no session was written on the server.
 func (s *signInSite) expectNoSession(t *testing.T, resp *http.Response) {
 	t.Helper()
+	var n int
+	if err := s.db.DB().QueryRow(`SELECT COUNT(*) FROM admin_sessions`).Scan(&n); err != nil {
+		t.Fatalf("count admin sessions: %v", err)
+	}
+	if n != 0 {
+		t.Errorf("%d admin session(s) were written on the server", n)
+	}
 	if c := cookieIn(resp, adminauth.SessionCookieName); c != nil && c.Value != "" {
 		t.Errorf("a session cookie was set: %+v", c)
 	}
