@@ -222,25 +222,33 @@ func readBody(t *testing.T, resp *http.Response) string {
 	return string(b)
 }
 
-// hiddenField finds a form field's value in a rendered page, whatever the
-// order of the input's attributes, with HTML escaping undone.
+// hiddenField finds a hidden input's value in a rendered page, in any
+// attribute order, with HTML escaping undone. It reads Clerk's own pages, which
+// html/template renders with double-quoted attributes; it is not a general
+// HTML parser. A hidden field without a value fails the test here, where the
+// cause is clear, rather than later in the flow.
 func hiddenField(t *testing.T, page, name string) string {
 	t.Helper()
 	for _, input := range inputTag.FindAllString(page, -1) {
 		attrs := map[string]string{}
 		for _, m := range attribute.FindAllStringSubmatch(input, -1) {
-			attrs[m[1]] = html.UnescapeString(m[2])
+			attrs[strings.ToLower(m[1])] = html.UnescapeString(m[2])
 		}
-		if attrs["name"] == name {
-			return attrs["value"]
+		if attrs["type"] != "hidden" || attrs["name"] != name {
+			continue
 		}
+		value, ok := attrs["value"]
+		if !ok || value == "" {
+			t.Fatalf("the hidden field %q has no value:\n%s", name, input)
+		}
+		return value
 	}
-	t.Fatalf("the page has no %q field:\n%s", name, page)
+	t.Fatalf("the page has no hidden %q field:\n%s", name, page)
 	return ""
 }
 
 var (
-	inputTag  = regexp.MustCompile(`<input\b[^>]*>`)
+	inputTag  = regexp.MustCompile(`(?i)<input\b[^>]*>`)
 	attribute = regexp.MustCompile(`([a-zA-Z_:][-a-zA-Z0-9_:.]*)="([^"]*)"`)
 )
 
