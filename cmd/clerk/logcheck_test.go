@@ -123,6 +123,9 @@ func captureLogs(t *testing.T) *logCapture {
 
 	prevDefault, prevOutput, prevFlags := slog.Default(), log.Writer(), log.Flags()
 	slog.SetDefault(c.Logger)
+	// Set explicitly rather than relying on SetDefault's side effect, which
+	// passes standard log lines through slog's level filter.
+	log.SetOutput(c)
 	t.Cleanup(func() {
 		slog.SetDefault(prevDefault)
 		log.SetOutput(prevOutput)
