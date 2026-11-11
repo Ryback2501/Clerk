@@ -8,6 +8,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"unicode"
 )
 
 // Clerk's settings are documented in two places: .env.example and the table of
@@ -160,11 +161,13 @@ func envExampleSettings(text string) []string {
 }
 
 // envFileValues reads the active lines the way `docker run --env-file` does:
-// NAME=value, the value taken as it is.
+// NAME=value, with only the leading whitespace of the line dropped, so a
+// trailing space stays in the value Clerk is given.
 func envFileValues(text string) map[string]string {
 	values := map[string]string{}
 	for _, line := range strings.Split(text, "\n") {
-		if m := settingLine.FindStringSubmatch(strings.TrimSpace(line)); m != nil && m[1] == "" {
+		line = strings.TrimLeftFunc(strings.TrimSuffix(line, "\r"), unicode.IsSpace)
+		if m := settingLine.FindStringSubmatch(line); m != nil && m[1] == "" {
 			values[m[2]] = m[3]
 		}
 	}
