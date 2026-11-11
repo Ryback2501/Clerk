@@ -312,7 +312,7 @@ func (p *fakeProvider) authorize(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "bad authorization request", http.StatusBadRequest)
 		return
 	}
-	code := "code-" + q.Get("state")
+	code := rand.Text() // unique per request, so sign-ins never collide
 	p.mu.Lock()
 	p.issued[code] = issuedCode{
 		nonce:       q.Get("nonce"),
@@ -336,8 +336,15 @@ func (p *fakeProvider) token(w http.ResponseWriter, r *http.Request) {
 	id, secret, ok := r.BasicAuth()
 	if ok {
 		// Basic credentials are form-encoded first (RFC 6749 §2.3.1).
-		id, _ = url.QueryUnescape(id)
-		secret, _ = url.QueryUnescape(secret)
+		var errID, errSecret error
+		id, errID = url.QueryUnescape(id)
+		secret, errSecret = url.QueryUnescape(secret)
+		if errID != nil || errSecret != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{
+				"error": "invalid_request", "error_description": "badly encoded basic credentials",
+			})
+			return
+		}
 	} else {
 		id, secret = r.PostFormValue("client_id"), r.PostFormValue("client_secret")
 	}
@@ -346,17 +353,25 @@ func (p *fakeProvider) token(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// A code is used up only by a successful exchange, so a rejected attempt
+	// reports its own cause instead of turning a retry into "unknown code".
 	code := r.PostFormValue("code")
 	p.mu.Lock()
+	defer p.mu.Unlock()
 	issued, ok := p.issued[code]
-	delete(p.issued, code)
-	p.mu.Unlock()
 	sum := sha256.Sum256([]byte(r.PostFormValue("code_verifier")))
-	if !ok || r.PostFormValue("redirect_uri") != issued.redirectURI ||
-		base64.RawURLEncoding.EncodeToString(sum[:]) != issued.challenge {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid_grant"})
+	switch {
+	case !ok:
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid_grant", "error_description": "unknown code"})
+		return
+	case r.PostFormValue("redirect_uri") != issued.redirectURI:
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid_grant", "error_description": "redirect_uri mismatch"})
+		return
+	case base64.RawURLEncoding.EncodeToString(sum[:]) != issued.challenge:
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid_grant", "error_description": "pkce verifier mismatch"})
 		return
 	}
+	delete(p.issued, code)
 
 	idToken, err := p.idToken(issued.nonce)
 	if err != nil {
