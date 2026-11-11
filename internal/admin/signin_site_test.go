@@ -68,6 +68,7 @@ func newSignInSite(t *testing.T) *signInSite {
 	if err != nil {
 		t.Fatal(err)
 	}
+	provider.ExpectCallback(public.String() + "/admin/auth/google/callback")
 
 	sessions := NewSessionStore(db)
 	bouncer := &fakeBouncer{}

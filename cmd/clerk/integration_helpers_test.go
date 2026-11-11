@@ -90,6 +90,7 @@ func startStack(t *testing.T, opts stackOptions) *stack {
 	// The listener exists before Clerk is built, so the issuer can name it.
 	srv := httptest.NewUnstartedServer(nil)
 	clerkURL := "http://" + srv.Listener.Addr().String()
+	provider.ExpectCallback(clerkURL + "/admin/auth/google/callback")
 
 	dir := t.TempDir()
 	env := map[string]string{
