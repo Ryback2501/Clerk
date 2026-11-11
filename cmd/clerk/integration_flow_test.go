@@ -1,7 +1,6 @@
 package main
 
 import (
-	"encoding/base64"
 	"encoding/json"
 	"net/http"
 	"net/url"
@@ -144,13 +143,14 @@ func (f *oidcFlow) login(t *testing.T) {
 // token exchanges the code, then checks the ID token's signature against the
 // published keys and its claims against this sign-in.
 func (f *oidcFlow) token(t *testing.T) {
-	header := http.Header{}
-	header.Set("Authorization", "Basic "+basicCredentials(f.client.ClientID, f.client.Secret))
 	resp := f.s.postForm(t, f.endpoint(t, "token_endpoint"), url.Values{
 		"grant_type":   {"authorization_code"},
 		"code":         {f.code},
 		"redirect_uri": {f.client.RedirectURI},
-	}, header)
+	}, func(req *http.Request) {
+		// client_secret_basic form-encodes each part first (RFC 6749 §2.3.1).
+		req.SetBasicAuth(url.QueryEscape(f.client.ClientID), url.QueryEscape(f.client.Secret))
+	})
 	body := readBody(t, resp)
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("token answered %d: %s", resp.StatusCode, body)
@@ -247,13 +247,6 @@ func (f *oidcFlow) endpoint(t *testing.T, key string) string {
 		t.Fatalf("discovery has no %s", key)
 	}
 	return v
-}
-
-// basicCredentials encodes client credentials for HTTP Basic authentication,
-// form-encoding each part first as RFC 6749 §2.3.1 requires.
-func basicCredentials(id, secret string) string {
-	return base64.StdEncoding.EncodeToString(
-		[]byte(url.QueryEscape(id) + ":" + url.QueryEscape(secret)))
 }
 
 // adminSignIn signs in to the admin interface through the stand-in provider,

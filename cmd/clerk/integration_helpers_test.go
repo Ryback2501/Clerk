@@ -7,6 +7,7 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
+	"html"
 	"io"
 	"log/slog"
 	"net/http"
@@ -192,15 +193,16 @@ func (s *stack) get(t *testing.T, target string, header http.Header) *http.Respo
 	return resp
 }
 
-func (s *stack) postForm(t *testing.T, target string, form url.Values, header http.Header) *http.Response {
+// postForm's edit, when given, adjusts the request before it is sent.
+func (s *stack) postForm(t *testing.T, target string, form url.Values, edit func(*http.Request)) *http.Response {
 	t.Helper()
 	req, err := http.NewRequest(http.MethodPost, target, strings.NewReader(form.Encode()))
 	if err != nil {
 		t.Fatal(err)
 	}
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	for k, v := range header {
-		req.Header[k] = v
+	if edit != nil {
+		edit(req)
 	}
 	resp, err := s.Client.Do(req)
 	if err != nil {
@@ -220,16 +222,27 @@ func readBody(t *testing.T, resp *http.Response) string {
 	return string(b)
 }
 
-// hiddenField finds a hidden form field's value in a rendered page.
+// hiddenField finds a form field's value in a rendered page, whatever the
+// order of the input's attributes, with HTML escaping undone.
 func hiddenField(t *testing.T, page, name string) string {
 	t.Helper()
-	re := regexp.MustCompile(`name="` + regexp.QuoteMeta(name) + `" value="([^"]*)"`)
-	m := re.FindStringSubmatch(page)
-	if m == nil {
-		t.Fatalf("the page has no %q field:\n%s", name, page)
+	for _, input := range inputTag.FindAllString(page, -1) {
+		attrs := map[string]string{}
+		for _, m := range attribute.FindAllStringSubmatch(input, -1) {
+			attrs[m[1]] = html.UnescapeString(m[2])
+		}
+		if attrs["name"] == name {
+			return attrs["value"]
+		}
 	}
-	return m[1]
+	t.Fatalf("the page has no %q field:\n%s", name, page)
+	return ""
 }
+
+var (
+	inputTag  = regexp.MustCompile(`<input\b[^>]*>`)
+	attribute = regexp.MustCompile(`([a-zA-Z_:][-a-zA-Z0-9_:.]*)="([^"]*)"`)
+)
 
 // fakeProvider is a stand-in OpenID Connect sign-in provider for the admin
 // interface. Its authorization step signs the stand-in administrator in at
