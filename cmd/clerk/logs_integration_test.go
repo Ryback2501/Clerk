@@ -23,7 +23,27 @@ func TestNoSecretInLogsIntegration(t *testing.T) {
 	skipUnlessIntegration(t)
 	logs := captureLogs(t)
 	var secrets []namedSecret
-	keep := func(name, value string) { secrets = append(secrets, namedSecret{name, value}) }
+	keep := func(name, value string) {
+		// A value a failed step never produced is not kept: that step has
+		// already failed the test, and an empty value would match every line.
+		if value != "" {
+			secrets = append(secrets, namedSecret{name, value})
+		}
+	}
+	scan := func() {
+		for _, leak := range findSecrets(logs.String(), secrets) {
+			t.Errorf("the %s appears in the logs: %s", leak.name, leak.line)
+		}
+	}
+	// step stops the test at the first failing step, as the later steps build
+	// on it, but still scans what was logged so far: a step can fail exactly
+	// because something went wrong, and that is when a leak is most likely.
+	step := func(name string, fn func(*testing.T)) {
+		if !t.Run(name, fn) {
+			scan()
+			t.FailNow()
+		}
+	}
 
 	s := startStack(t, stackOptions{Logger: logs.Logger})
 	keep("Bouncer API key", itBouncerAPIKey)
@@ -32,7 +52,7 @@ func TestNoSecretInLogsIntegration(t *testing.T) {
 		keep(fmt.Sprintf("signing private key (line %d of the key file)", i+1), line)
 	}
 
-	t.Run("admin session", func(t *testing.T) {
+	step("admin session", func(t *testing.T) {
 		if resp := s.adminSignIn(t); resp.StatusCode != http.StatusSeeOther {
 			t.Fatalf("admin sign-in answered %d: %s", resp.StatusCode, readBody(t, resp))
 		}
@@ -66,15 +86,18 @@ func TestNoSecretInLogsIntegration(t *testing.T) {
 	})
 
 	flow := s.newFlow(t)
-	t.Run("sign-in flow", func(t *testing.T) {
+	step("sign-in flow", func(t *testing.T) {
+		// Kept even when a step fails part-way, for the scan that follows.
+		defer func() {
+			keep("client secret", flow.client.Secret)
+			keep("authorization code", flow.code)
+			keep("access token", flow.accessToken)
+			keep("ID token", flow.idToken)
+		}()
 		flow.run(t)
-		keep("client secret", flow.client.Secret)
-		keep("authorization code", flow.code)
-		keep("access token", flow.accessToken)
-		keep("ID token", flow.idToken)
 	})
 
-	t.Run("refusals", func(t *testing.T) {
+	step("refusals", func(t *testing.T) {
 		const wrongSecret = "wrong-client-secret-for-the-log-check"
 		keep("wrong client secret", wrongSecret)
 		if status := flow.exchange(t, wrongSecret); status != http.StatusUnauthorized {
@@ -97,7 +120,7 @@ func TestNoSecretInLogsIntegration(t *testing.T) {
 		}
 	})
 
-	t.Run("wrong Bouncer API key", func(t *testing.T) {
+	step("wrong Bouncer API key", func(t *testing.T) {
 		const wrongKey = "bncr_wrong-key-for-the-log-check"
 		keep("wrong Bouncer API key", wrongKey)
 		other := startStack(t, stackOptions{Logger: logs.Logger, BouncerAPIKey: wrongKey})
@@ -114,9 +137,7 @@ func TestNoSecretInLogsIntegration(t *testing.T) {
 	if !strings.Contains(recorded, "administrator signed in") {
 		t.Fatalf("the log capture recorded nothing from Clerk:\n%s", recorded)
 	}
-	for _, leak := range findSecrets(recorded, secrets) {
-		t.Errorf("the %s appears in the logs: %s", leak.name, leak.line)
-	}
+	scan()
 }
 
 // signingKeyLines returns the base64 lines of the signing key file. Any one of
