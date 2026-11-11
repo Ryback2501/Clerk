@@ -53,8 +53,6 @@ func (b *fakeBouncer) answer(err error) {
 
 func newSignInSite(t *testing.T) *signInSite {
 	t.Helper()
-	provider := standin.NewProvider(t)
-
 	db, err := store.Open(filepath.Join(t.TempDir(), "clerk.db"))
 	if err != nil {
 		t.Fatalf("open store: %v", err)
@@ -68,13 +66,15 @@ func newSignInSite(t *testing.T) *signInSite {
 	if err != nil {
 		t.Fatal(err)
 	}
-	provider.ExpectCallback(public.String() + "/admin/auth/google/callback")
+	provider := standin.NewProvider(t, public.String()+"/admin/auth/google/callback")
 
 	sessions := NewSessionStore(db)
 	bouncer := &fakeBouncer{}
-	// The test's own context: it lasts as long as the site, so nothing the
-	// OAuth client keeps from it is cancelled early.
-	oauth, err := adminauth.NewOAuth(t.Context(), adminauth.OAuthConfig{
+	// It lasts as long as the site, so nothing the OAuth client keeps from it
+	// is cancelled early, but a hung provider still fails the test in time.
+	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
+	t.Cleanup(cancel)
+	oauth, err := adminauth.NewOAuth(ctx, adminauth.OAuthConfig{
 		PublicURL: public,
 		Providers: map[string]adminauth.ClientCredentials{"google": {
 			ClientID:     standin.ProviderClientID,
@@ -201,7 +201,8 @@ func (s *signInSite) expectSignInPageWith(t *testing.T, resp *http.Response, mes
 }
 
 // expectNoSession checks the answer set no session cookie, the browser holds
-// none, and no session was written on the server.
+// none, and no session was written on the server. It counts every stored
+// session, so it suits a site where nobody has signed in yet.
 func (s *signInSite) expectNoSession(t *testing.T, resp *http.Response) {
 	t.Helper()
 	var n int

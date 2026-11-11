@@ -72,7 +72,6 @@ type stack struct {
 func startStack(t *testing.T, opts stackOptions) *stack {
 	t.Helper()
 
-	provider := standin.NewProvider(t)
 	bouncer := newFakeBouncer(t)
 	bouncerURL := bouncer.URL
 	if opts.BouncerDown {
@@ -89,8 +88,9 @@ func startStack(t *testing.T, opts stackOptions) *stack {
 
 	// The listener exists before Clerk is built, so the issuer can name it.
 	srv := httptest.NewUnstartedServer(nil)
+	t.Cleanup(srv.Close)
 	clerkURL := "http://" + srv.Listener.Addr().String()
-	provider.ExpectCallback(clerkURL + "/admin/auth/google/callback")
+	provider := standin.NewProvider(t, clerkURL+"/admin/auth/google/callback")
 
 	dir := t.TempDir()
 	env := map[string]string{
@@ -108,13 +108,12 @@ func startStack(t *testing.T, opts stackOptions) *stack {
 	a, err := newApp(ctx, func(key string) string { return env[key] }, logger)
 	if err != nil {
 		cancel()
-		srv.Close()
 		t.Fatalf("start clerk: %v", err)
 	}
 	srv.Config.Handler = a.handler
 	srv.Start()
 	t.Cleanup(func() {
-		srv.Close()
+		srv.Close() // before the database closes, so no request is in flight
 		cancel()
 		_ = a.Close()
 	})

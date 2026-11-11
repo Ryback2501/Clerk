@@ -41,7 +41,7 @@ type Provider struct {
 	key    *rsa.PrivateKey
 
 	mu       sync.Mutex
-	callback string                // the only redirect URI accepted, once set
+	callback string                // the only redirect URI accepted
 	issued   map[string]issuedCode // code → the request that issued it
 	seen     []Secret              // every secret of an admin sign-in, for log checks
 }
@@ -52,14 +52,6 @@ func (p *Provider) Secrets() []Secret {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	return append([]Secret(nil), p.seen...)
-}
-
-// ExpectCallback registers the one redirect URI the provider accepts, as a
-// real provider only accepts the callback registered with it.
-func (p *Provider) ExpectCallback(uri string) {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	p.callback = uri
 }
 
 // remember records a secret; the caller must not hold p.mu.
@@ -76,15 +68,18 @@ type issuedCode struct {
 	nonce, challenge, redirectURI string
 }
 
-// NewProvider starts a stand-in provider for the length of the test. Until
-// ExpectCallback is called it accepts any redirect URI.
-func NewProvider(t testing.TB) *Provider {
+// NewProvider starts a stand-in provider for the length of the test. Like a
+// real provider, it accepts only the callback registered with it.
+func NewProvider(t testing.TB, callback string) *Provider {
 	t.Helper()
 	key, err := rsa.GenerateKey(rand.Reader, 2048)
 	if err != nil {
 		t.Fatal(err)
 	}
-	p := &Provider{key: key, issued: map[string]issuedCode{}}
+	if callback == "" {
+		t.Fatal("standin: a provider needs the callback registered with it")
+	}
+	p := &Provider{key: key, callback: callback, issued: map[string]issuedCode{}}
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /.well-known/openid-configuration", func(w http.ResponseWriter, _ *http.Request) {
@@ -120,10 +115,7 @@ func (p *Provider) authorize(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "bad authorization request", http.StatusBadRequest)
 		return
 	}
-	p.mu.Lock()
-	callback := p.callback
-	p.mu.Unlock()
-	if callback != "" && q.Get("redirect_uri") != callback {
+	if q.Get("redirect_uri") != p.callback {
 		// What a real provider answers to an unregistered callback.
 		http.Error(w, "redirect_uri_mismatch", http.StatusBadRequest)
 		return
