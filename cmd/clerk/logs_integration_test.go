@@ -181,7 +181,9 @@ func signingKeySecrets(t *testing.T, path string) []namedSecret {
 	n := 0
 	for _, line := range strings.Split(string(raw), "\n") {
 		line = strings.TrimSpace(line)
-		if line != "" && !strings.HasPrefix(line, "-----") {
+		// The last line can be a few characters only; too short to search
+		// for, and the parts below cover the same key anyway.
+		if len(line) >= minSecretLength && !strings.HasPrefix(line, "-----") {
 			n++
 			secrets = append(secrets, namedSecret{fmt.Sprintf("signing private key (line %d of the key file)", n), line})
 		}
@@ -197,18 +199,20 @@ func signingKeySecrets(t *testing.T, path string) []namedSecret {
 		key = rsaKey
 	}
 	key.Precompute()
-	parts := map[string]*big.Int{
-		"private exponent": key.D,
-		"first prime":      key.Primes[0],
-		"second prime":     key.Primes[1],
-		"CRT exponent dp":  key.Precomputed.Dp,
-		"CRT exponent dq":  key.Precomputed.Dq,
-		"CRT coefficient":  key.Precomputed.Qinv,
-	}
-	for name, v := range parts {
+	for _, part := range []struct {
+		name  string
+		value *big.Int
+	}{
+		{"private exponent", key.D},
+		{"first prime", key.Primes[0]},
+		{"second prime", key.Primes[1]},
+		{"CRT exponent dp", key.Precomputed.Dp},
+		{"CRT exponent dq", key.Precomputed.Dq},
+		{"CRT coefficient", key.Precomputed.Qinv},
+	} {
 		secrets = append(secrets,
-			namedSecret{"signing key " + name + " (base64url)", base64.RawURLEncoding.EncodeToString(v.Bytes())},
-			namedSecret{"signing key " + name + " (decimal)", v.String()})
+			namedSecret{"signing key " + part.name + " (base64url)", base64.RawURLEncoding.EncodeToString(part.value.Bytes())},
+			namedSecret{"signing key " + part.name + " (decimal)", part.value.String()})
 	}
 	return secrets
 }

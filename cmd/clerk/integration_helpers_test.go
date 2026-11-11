@@ -273,10 +273,14 @@ func (p *fakeProvider) Secrets() []namedSecret {
 	return append([]namedSecret(nil), p.seen...)
 }
 
+// remember records a secret; the caller must not hold p.mu.
 func (p *fakeProvider) remember(name, value string) {
-	if value != "" {
-		p.seen = append(p.seen, namedSecret{name, value})
+	if value == "" {
+		return
 	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.seen = append(p.seen, namedSecret{name, value})
 }
 
 type issuedCode struct {
@@ -327,7 +331,6 @@ func (p *fakeProvider) authorize(w http.ResponseWriter, r *http.Request) {
 	}
 	code := rand.Text() // unique per request, so sign-ins never collide
 	p.mu.Lock()
-	p.remember("admin sign-in provider code", code)
 	p.issued[code] = issuedCode{
 		nonce:       q.Get("nonce"),
 		challenge:   q.Get("code_challenge"),
@@ -339,6 +342,7 @@ func (p *fakeProvider) authorize(w http.ResponseWriter, r *http.Request) {
 	v.Set("code", code)
 	v.Set("state", q.Get("state"))
 	back.RawQuery = v.Encode()
+	p.remember("admin sign-in provider code", code)
 	http.Redirect(w, r, back.String(), http.StatusFound)
 }
 
@@ -373,8 +377,8 @@ func (p *fakeProvider) token(w http.ResponseWriter, r *http.Request) {
 	p.mu.Lock()
 	issued, ok := p.issued[code]
 	delete(p.issued, code)
-	p.remember("admin sign-in PKCE verifier", r.PostFormValue("code_verifier"))
 	p.mu.Unlock()
+	p.remember("admin sign-in PKCE verifier", r.PostFormValue("code_verifier"))
 	sum := sha256.Sum256([]byte(r.PostFormValue("code_verifier")))
 	switch {
 	case !ok:
@@ -398,10 +402,8 @@ func (p *fakeProvider) token(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	accessToken := "provider-access-token-" + rand.Text()
-	p.mu.Lock()
 	p.remember("admin sign-in provider access token", accessToken)
 	p.remember("admin sign-in provider ID token", idToken)
-	p.mu.Unlock()
 	writeJSON(w, http.StatusOK, map[string]any{
 		"access_token": accessToken,
 		"token_type":   "Bearer",
