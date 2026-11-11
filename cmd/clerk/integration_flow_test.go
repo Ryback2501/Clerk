@@ -43,12 +43,12 @@ func (s *stack) newFlow(t *testing.T) *oidcFlow {
 }
 
 // run performs every step in order, each as a sub-test named after it, and
-// stops at the first one that fails.
+// stops at the first one that fails. The failing sub-test already marks the
+// test failed and says why, so nothing more is reported here.
 func (f *oidcFlow) run(t *testing.T) {
-	t.Helper()
 	for _, step := range f.steps() {
 		if !t.Run(step.name, step.fn) {
-			t.Fatalf("stopped: the %s step failed", step.name)
+			return
 		}
 	}
 }
@@ -219,9 +219,9 @@ func (f *oidcFlow) verifyIDToken(t *testing.T) map[string]any {
 
 // userinfo presents the access token and expects the user's claims.
 func (f *oidcFlow) userinfo(t *testing.T) {
-	header := http.Header{}
-	header.Set("Authorization", "Bearer "+f.accessToken)
-	resp := f.s.get(t, f.endpoint(t, "userinfo_endpoint"), header)
+	resp := f.s.get(t, f.endpoint(t, "userinfo_endpoint"), func(req *http.Request) {
+		req.Header.Set("Authorization", "Bearer "+f.accessToken)
+	})
 	body := readBody(t, resp)
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("userinfo answered %d: %s", resp.StatusCode, body)

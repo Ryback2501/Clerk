@@ -176,15 +176,15 @@ func (s *stack) seedClient(t *testing.T) testClient {
 }
 
 // get and postForm are the client's requests, failing the test on a transport
-// error.
-func (s *stack) get(t *testing.T, target string, header http.Header) *http.Response {
+// error. edit, when given, adjusts the request before it is sent.
+func (s *stack) get(t *testing.T, target string, edit func(*http.Request)) *http.Response {
 	t.Helper()
 	req, err := http.NewRequest(http.MethodGet, target, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	for k, v := range header {
-		req.Header[k] = v
+	if edit != nil {
+		edit(req)
 	}
 	resp, err := s.Client.Do(req)
 	if err != nil {
@@ -193,7 +193,6 @@ func (s *stack) get(t *testing.T, target string, header http.Header) *http.Respo
 	return resp
 }
 
-// postForm's edit, when given, adjusts the request before it is sent.
 func (s *stack) postForm(t *testing.T, target string, form url.Values, edit func(*http.Request)) *http.Response {
 	t.Helper()
 	req, err := http.NewRequest(http.MethodPost, target, strings.NewReader(form.Encode()))
