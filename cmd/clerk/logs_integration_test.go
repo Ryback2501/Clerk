@@ -14,8 +14,6 @@ import (
 	"regexp"
 	"strings"
 	"testing"
-
-	"github.com/Ryback2501/Clerk/internal/adminauth"
 )
 
 // Clerk must never write a secret to its logs: client secrets, authorization
@@ -225,17 +223,11 @@ var secretInDialog = regexp.MustCompile(`<code class="value secret">([^<]+)</cod
 // adminSessionID is the value of the admin session cookie the client holds.
 func (s *stack) adminSessionID(t *testing.T) string {
 	t.Helper()
-	u, err := url.Parse(s.URL + "/admin")
-	if err != nil {
-		t.Fatal(err)
+	id := s.adminSessionValue(t)
+	if id == "" {
+		t.Fatal("the client holds no admin session cookie")
 	}
-	for _, c := range s.Client.Jar.Cookies(u) {
-		if c.Name == adminauth.SessionCookieName && c.Value != "" {
-			return c.Value
-		}
-	}
-	t.Fatal("the client holds no admin session cookie")
-	return ""
+	return id
 }
 
 // adminCSRF opens the admin page and returns the CSRF token its forms carry.
@@ -261,17 +253,11 @@ func (s *stack) adminPost(t *testing.T, path, csrf string, form url.Values) *htt
 	})
 }
 
-// exchange presents the flow's code at the token endpoint with the given
-// client secret, and returns the status.
+// exchange presents the flow's code with the given client secret and
+// returns the status.
 func (f *oidcFlow) exchange(t *testing.T, secret string) int {
 	t.Helper()
-	resp := f.s.postForm(t, f.endpoint(t, "token_endpoint"), url.Values{
-		"grant_type":   {"authorization_code"},
-		"code":         {f.code},
-		"redirect_uri": {f.client.RedirectURI},
-	}, func(req *http.Request) {
-		req.SetBasicAuth(url.QueryEscape(f.client.ClientID), url.QueryEscape(secret))
-	})
+	resp := f.postToken(t, secret)
 	_ = readBody(t, resp)
 	return resp.StatusCode
 }

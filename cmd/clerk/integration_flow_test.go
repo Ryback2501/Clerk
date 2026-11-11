@@ -143,14 +143,7 @@ func (f *oidcFlow) login(t *testing.T) {
 // token exchanges the code, then checks the ID token's signature against the
 // published keys and its claims against this sign-in.
 func (f *oidcFlow) token(t *testing.T) {
-	resp := f.s.postForm(t, f.endpoint(t, "token_endpoint"), url.Values{
-		"grant_type":   {"authorization_code"},
-		"code":         {f.code},
-		"redirect_uri": {f.client.RedirectURI},
-	}, func(req *http.Request) {
-		// client_secret_basic form-encodes each part first (RFC 6749 §2.3.1).
-		req.SetBasicAuth(url.QueryEscape(f.client.ClientID), url.QueryEscape(f.client.Secret))
-	})
+	resp := f.postToken(t, f.client.Secret)
 	body := readBody(t, resp)
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("token answered %d: %s", resp.StatusCode, body)
@@ -183,6 +176,20 @@ func (f *oidcFlow) token(t *testing.T) {
 			t.Errorf("ID token %s = %v, want %s", key, got, want)
 		}
 	}
+}
+
+// postToken presents the flow's code at the token endpoint, authenticating
+// with the given client secret.
+func (f *oidcFlow) postToken(t *testing.T, secret string) *http.Response {
+	t.Helper()
+	return f.s.postForm(t, f.endpoint(t, "token_endpoint"), url.Values{
+		"grant_type":   {"authorization_code"},
+		"code":         {f.code},
+		"redirect_uri": {f.client.RedirectURI},
+	}, func(req *http.Request) {
+		// client_secret_basic form-encodes each part first (RFC 6749 §2.3.1).
+		req.SetBasicAuth(url.QueryEscape(f.client.ClientID), url.QueryEscape(secret))
+	})
 }
 
 // verifyIDToken checks the ID token's RS256 signature with the key published
@@ -273,14 +280,20 @@ func (s *stack) adminSignIn(t *testing.T) *http.Response {
 // hasAdminSession reports whether the client holds an admin session cookie.
 func (s *stack) hasAdminSession(t *testing.T) bool {
 	t.Helper()
+	return s.adminSessionValue(t) != ""
+}
+
+// adminSessionValue is the client's admin session cookie, or "" without one.
+func (s *stack) adminSessionValue(t *testing.T) string {
+	t.Helper()
 	u, err := url.Parse(s.URL + "/admin")
 	if err != nil {
 		t.Fatal(err)
 	}
 	for _, c := range s.Client.Jar.Cookies(u) {
 		if c.Name == adminauth.SessionCookieName && c.Value != "" {
-			return true
+			return c.Value
 		}
 	}
-	return false
+	return ""
 }
