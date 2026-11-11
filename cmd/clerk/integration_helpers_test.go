@@ -233,14 +233,13 @@ func hiddenField(t *testing.T, page, name string) string {
 		for _, m := range attribute.FindAllStringSubmatch(input, -1) {
 			attrs[strings.ToLower(m[1])] = html.UnescapeString(m[2])
 		}
-		if attrs["type"] != "hidden" || attrs["name"] != name {
+		if !strings.EqualFold(attrs["type"], "hidden") || attrs["name"] != name {
 			continue
 		}
-		value, ok := attrs["value"]
-		if !ok || value == "" {
+		if value := attrs["value"]; value == "" {
 			t.Fatalf("the hidden field %q has no value:\n%s", name, input)
 		}
-		return value
+		return attrs["value"]
 	}
 	t.Fatalf("the page has no hidden %q field:\n%s", name, page)
 	return ""
@@ -352,12 +351,13 @@ func (p *fakeProvider) token(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// A code is used up only by a successful exchange, so a rejected attempt
-	// reports its own cause instead of turning a retry into "unknown code".
+	// Like a real provider's, a code is single-use: any exchange attempt uses
+	// it up, successful or not. Each refusal still says why.
 	code := r.PostFormValue("code")
 	p.mu.Lock()
-	defer p.mu.Unlock()
 	issued, ok := p.issued[code]
+	delete(p.issued, code)
+	p.mu.Unlock()
 	sum := sha256.Sum256([]byte(r.PostFormValue("code_verifier")))
 	switch {
 	case !ok:
@@ -370,7 +370,6 @@ func (p *fakeProvider) token(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid_grant", "error_description": "pkce verifier mismatch"})
 		return
 	}
-	delete(p.issued, code)
 
 	idToken, err := p.idToken(issued.nonce)
 	if err != nil {

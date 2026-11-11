@@ -43,12 +43,12 @@ func (s *stack) newFlow(t *testing.T) *oidcFlow {
 }
 
 // run performs every step in order, each as a sub-test named after it, and
-// stops at the first one that fails. The failing sub-test already marks the
-// test failed and says why, so nothing more is reported here.
+// stops the calling test at the first one that fails. The failing sub-test
+// already says why, so nothing more is reported here.
 func (f *oidcFlow) run(t *testing.T) {
 	for _, step := range f.steps() {
 		if !t.Run(step.name, step.fn) {
-			return
+			t.FailNow()
 		}
 	}
 }
