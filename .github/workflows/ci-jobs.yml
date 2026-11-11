@@ -90,10 +90,12 @@ jobs:
         run: e2e/stack.sh up
       # --ipc=host: Playwright's advice for Chromium. --user: test-results/ stays the runner's,
       # so upload-artifact and cleanup work. HOME=/tmp: npm gets a writable cache.
+      # -e CI: the runner's CI=true does not reach the container by itself, and without it
+      # playwright.config.ts picks the html reporter, which waits for Ctrl+C after a failure.
       - name: Run
         run: >
           docker run --rm --network host --ipc=host
-          --user "$(id -u):$(id -g)" -e HOME=/tmp
+          --user "$(id -u):$(id -g)" -e HOME=/tmp -e CI
           -v "$PWD/e2e:/work" -w /work
           mcr.microsoft.com/playwright:v1.63.0-noble
           sh -c "npm ci && npx playwright test"
