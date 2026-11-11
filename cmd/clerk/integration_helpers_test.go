@@ -262,6 +262,21 @@ type fakeProvider struct {
 
 	mu     sync.Mutex
 	issued map[string]issuedCode // code → the request that issued it
+	seen   []namedSecret         // every secret of an admin sign-in, for log checks
+}
+
+// Secrets returns the secret values the admin sign-ins exchanged with this
+// provider so far: codes, PKCE verifiers and tokens.
+func (p *fakeProvider) Secrets() []namedSecret {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return append([]namedSecret(nil), p.seen...)
+}
+
+func (p *fakeProvider) remember(name, value string) {
+	if value != "" {
+		p.seen = append(p.seen, namedSecret{name, value})
+	}
 }
 
 type issuedCode struct {
@@ -312,6 +327,7 @@ func (p *fakeProvider) authorize(w http.ResponseWriter, r *http.Request) {
 	}
 	code := rand.Text() // unique per request, so sign-ins never collide
 	p.mu.Lock()
+	p.remember("admin sign-in provider code", code)
 	p.issued[code] = issuedCode{
 		nonce:       q.Get("nonce"),
 		challenge:   q.Get("code_challenge"),
@@ -357,6 +373,7 @@ func (p *fakeProvider) token(w http.ResponseWriter, r *http.Request) {
 	p.mu.Lock()
 	issued, ok := p.issued[code]
 	delete(p.issued, code)
+	p.remember("admin sign-in PKCE verifier", r.PostFormValue("code_verifier"))
 	p.mu.Unlock()
 	sum := sha256.Sum256([]byte(r.PostFormValue("code_verifier")))
 	switch {
@@ -380,8 +397,13 @@ func (p *fakeProvider) token(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
+	accessToken := "provider-access-token-" + rand.Text()
+	p.mu.Lock()
+	p.remember("admin sign-in provider access token", accessToken)
+	p.remember("admin sign-in provider ID token", idToken)
+	p.mu.Unlock()
 	writeJSON(w, http.StatusOK, map[string]any{
-		"access_token": "provider-access-token",
+		"access_token": accessToken,
 		"token_type":   "Bearer",
 		"expires_in":   3600,
 		"id_token":     idToken,

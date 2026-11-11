@@ -1,8 +1,12 @@
 package main
 
 import (
+	"crypto/rsa"
+	"crypto/x509"
+	"encoding/base64"
 	"encoding/pem"
 	"fmt"
+	"math/big"
 	"net/http"
 	"net/url"
 	"os"
@@ -48,11 +52,17 @@ func TestNoSecretInLogsIntegration(t *testing.T) {
 	s := startStack(t, stackOptions{Logger: logs.Logger})
 	keep("Bouncer API key", itBouncerAPIKey)
 	keep("sign-in provider client secret", itProviderSecret)
-	for i, line := range signingKeyLines(t, s.App.cfg.KeysPath) {
-		keep(fmt.Sprintf("signing private key (line %d of the key file)", i+1), line)
+	for _, part := range signingKeySecrets(t, s.App.cfg.KeysPath) {
+		keep(part.name, part.value)
 	}
 
 	step("admin session", func(t *testing.T) {
+		// The admin sign-in's own secrets, exchanged with the provider.
+		defer func() {
+			for _, secret := range s.Provider.Secrets() {
+				keep(secret.name, secret.value)
+			}
+		}()
 		if resp := s.adminSignIn(t); resp.StatusCode != http.StatusSeeOther {
 			t.Fatalf("admin sign-in answered %d: %s", resp.StatusCode, readBody(t, resp))
 		}
@@ -90,6 +100,7 @@ func TestNoSecretInLogsIntegration(t *testing.T) {
 		// Kept even when a step fails part-way, for the scan that follows.
 		defer func() {
 			keep("client secret", flow.client.Secret)
+			keep("client credentials as sent in a Basic header", basicCredentials(flow.client.ClientID, flow.client.Secret))
 			keep("authorization code", flow.code)
 			keep("access token", flow.accessToken)
 			keep("ID token", flow.idToken)
@@ -100,6 +111,7 @@ func TestNoSecretInLogsIntegration(t *testing.T) {
 	step("refusals", func(t *testing.T) {
 		const wrongSecret = "wrong-client-secret-for-the-log-check"
 		keep("wrong client secret", wrongSecret)
+		keep("wrong client credentials as sent in a Basic header", basicCredentials(flow.client.ClientID, wrongSecret))
 		if status := flow.exchange(t, wrongSecret); status != http.StatusUnauthorized {
 			t.Errorf("a wrong client secret answered %d, want 401", status)
 		}
@@ -140,9 +152,11 @@ func TestNoSecretInLogsIntegration(t *testing.T) {
 	scan()
 }
 
-// signingKeyLines returns the base64 lines of the signing key file. Any one of
-// them in a log would be part of the private key.
-func signingKeyLines(t *testing.T, path string) []string {
+// signingKeySecrets returns the forms the signing key could leak in: each
+// base64 line of its PEM file, and each private part of the key (the private
+// exponent, the primes and the CRT values) in base64url, as a JWK carries
+// them, and in decimal, as printing the key with %v does.
+func signingKeySecrets(t *testing.T, path string) []namedSecret {
 	t.Helper()
 	raw, err := os.ReadFile(filepath.Clean(path))
 	if err != nil {
@@ -152,14 +166,48 @@ func signingKeyLines(t *testing.T, path string) []string {
 	if block == nil {
 		t.Fatalf("the signing key file is not PEM")
 	}
-	var lines []string
+
+	var secrets []namedSecret
+	n := 0
 	for _, line := range strings.Split(string(raw), "\n") {
 		line = strings.TrimSpace(line)
 		if line != "" && !strings.HasPrefix(line, "-----") {
-			lines = append(lines, line)
+			n++
+			secrets = append(secrets, namedSecret{fmt.Sprintf("signing private key (line %d of the key file)", n), line})
 		}
 	}
-	return lines
+
+	key, err := x509.ParsePKCS1PrivateKey(block.Bytes)
+	if err != nil {
+		parsed, err8 := x509.ParsePKCS8PrivateKey(block.Bytes)
+		rsaKey, ok := parsed.(*rsa.PrivateKey)
+		if err8 != nil || !ok {
+			t.Fatalf("the signing key is not an RSA key: %v / %v", err, err8)
+		}
+		key = rsaKey
+	}
+	key.Precompute()
+	parts := map[string]*big.Int{
+		"private exponent": key.D,
+		"first prime":      key.Primes[0],
+		"second prime":     key.Primes[1],
+		"CRT exponent dp":  key.Precomputed.Dp,
+		"CRT exponent dq":  key.Precomputed.Dq,
+		"CRT coefficient":  key.Precomputed.Qinv,
+	}
+	for name, v := range parts {
+		secrets = append(secrets,
+			namedSecret{"signing key " + name + " (base64url)", base64.RawURLEncoding.EncodeToString(v.Bytes())},
+			namedSecret{"signing key " + name + " (decimal)", v.String()})
+	}
+	return secrets
+}
+
+// basicCredentials is the value of an Authorization: Basic header for these
+// client credentials, each part form-encoded first (RFC 6749 §2.3.1): a
+// logged header would carry the secret only in this encoded form.
+func basicCredentials(id, secret string) string {
+	return base64.StdEncoding.EncodeToString([]byte(url.QueryEscape(id) + ":" + url.QueryEscape(secret)))
 }
 
 // revealedSecret reads the client secret from the one-time dialog in a page.
