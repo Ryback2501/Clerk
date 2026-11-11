@@ -14,6 +14,8 @@ import (
 	"regexp"
 	"strings"
 	"testing"
+
+	"github.com/Ryback2501/Clerk/internal/standin"
 )
 
 // Clerk must never write a secret to its logs: client secrets, authorization
@@ -35,7 +37,7 @@ func TestNoSecretInLogsIntegration(t *testing.T) {
 	// Every stack the test starts logs into the capture. Its signing key is
 	// read at once, while the key file exists; its provider's secrets are
 	// collected at the scan, so a sign-in made at any point is included.
-	var providers []*fakeProvider
+	var providers []*standin.Provider
 	start := func(t *testing.T, opts stackOptions) *stack {
 		t.Helper()
 		opts.Logger = logs.Logger
@@ -53,7 +55,7 @@ func TestNoSecretInLogsIntegration(t *testing.T) {
 	t.Cleanup(func() {
 		for _, p := range providers {
 			for _, secret := range p.Secrets() {
-				keep(secret.name, secret.value)
+				keep(secret.Name, secret.Value)
 			}
 		}
 		for _, leak := range findSecrets(logs.String(), secrets) {
