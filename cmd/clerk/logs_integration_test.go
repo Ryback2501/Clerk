@@ -31,7 +31,7 @@ func TestNoSecretInLogsIntegration(t *testing.T) {
 		// A value a failed step never produced is not kept: that step has
 		// already failed the test, and an empty value would match every line.
 		if value != "" {
-			secrets = append(secrets, namedSecret{name, value})
+			secrets = append(secrets, namedSecret{Name: name, Value: value})
 		}
 	}
 	// Every stack the test starts logs into the capture. Its signing key is
@@ -44,7 +44,7 @@ func TestNoSecretInLogsIntegration(t *testing.T) {
 		st := startStack(t, opts)
 		providers = append(providers, st.Provider)
 		for _, part := range signingKeySecrets(t, st.App.cfg.KeysPath) {
-			keep(part.name, part.value)
+			keep(part.Name, part.Value)
 		}
 		return st
 	}
@@ -54,9 +54,7 @@ func TestNoSecretInLogsIntegration(t *testing.T) {
 	// leak is most likely.
 	t.Cleanup(func() {
 		for _, p := range providers {
-			for _, secret := range p.Secrets() {
-				keep(secret.Name, secret.Value)
-			}
+			secrets = append(secrets, p.Secrets()...)
 		}
 		for _, leak := range findSecrets(logs.String(), secrets) {
 			t.Errorf("the %s appears in the logs: %s", leak.name, leak.line)
@@ -187,7 +185,7 @@ func signingKeySecrets(t *testing.T, path string) []namedSecret {
 		// for, and the parts below cover the same key anyway.
 		if len(line) >= minSecretLength && !strings.HasPrefix(line, "-----") {
 			n++
-			secrets = append(secrets, namedSecret{fmt.Sprintf("signing private key (line %d of the key file)", n), line})
+			secrets = append(secrets, namedSecret{Name: fmt.Sprintf("signing private key (line %d of the key file)", n), Value: line})
 		}
 	}
 
@@ -213,8 +211,8 @@ func signingKeySecrets(t *testing.T, path string) []namedSecret {
 		{"CRT coefficient", key.Precomputed.Qinv},
 	} {
 		secrets = append(secrets,
-			namedSecret{"signing key " + part.name + " (base64url)", base64.RawURLEncoding.EncodeToString(part.value.Bytes())},
-			namedSecret{"signing key " + part.name + " (decimal)", part.value.String()})
+			namedSecret{Name: "signing key " + part.name + " (base64url)", Value: base64.RawURLEncoding.EncodeToString(part.value.Bytes())},
+			namedSecret{Name: "signing key " + part.name + " (decimal)", Value: part.value.String()})
 	}
 	return secrets
 }

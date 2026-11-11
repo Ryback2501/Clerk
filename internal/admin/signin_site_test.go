@@ -8,7 +8,6 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"path/filepath"
-	"regexp"
 	"strings"
 	"sync"
 	"testing"
@@ -64,6 +63,7 @@ func newSignInSite(t *testing.T) *signInSite {
 
 	// The listener exists first, so the callback URL can name it.
 	srv := httptest.NewUnstartedServer(nil)
+	t.Cleanup(srv.Close)
 	public, err := url.Parse("http://" + srv.Listener.Addr().String())
 	if err != nil {
 		t.Fatal(err)
@@ -72,9 +72,9 @@ func newSignInSite(t *testing.T) *signInSite {
 
 	sessions := NewSessionStore(db)
 	bouncer := &fakeBouncer{}
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	oauth, err := adminauth.NewOAuth(ctx, adminauth.OAuthConfig{
+	// The test's own context: it lasts as long as the site, so nothing the
+	// OAuth client keeps from it is cancelled early.
+	oauth, err := adminauth.NewOAuth(t.Context(), adminauth.OAuthConfig{
 		PublicURL: public,
 		Providers: map[string]adminauth.ClientCredentials{"google": {
 			ClientID:     standin.ProviderClientID,
@@ -85,19 +85,16 @@ func newSignInSite(t *testing.T) *signInSite {
 		Authorizer: bouncer,
 	})
 	if err != nil {
-		srv.Close()
 		t.Fatalf("admin sign-in: %v", err)
 	}
 	h, err := NewWithOAuth(db, oauth)
 	if err != nil {
-		srv.Close()
 		t.Fatalf("admin handler: %v", err)
 	}
 	mux := http.NewServeMux()
 	h.Register(mux)
 	srv.Config.Handler = mux
 	srv.Start()
-	t.Cleanup(srv.Close)
 
 	jar, err := cookiejar.New(nil)
 	if err != nil {
@@ -182,14 +179,12 @@ func (s *signInSite) csrf(t *testing.T) string {
 	t.Helper()
 	resp := s.get(t, "/admin")
 	page := readAll(t, resp)
-	m := csrfField.FindStringSubmatch(page)
+	m := csrfPattern.FindStringSubmatch(page)
 	if resp.StatusCode != http.StatusOK || m == nil {
 		t.Fatalf("/admin answered %d without a CSRF token:\n%s", resp.StatusCode, page)
 	}
 	return m[1]
 }
-
-var csrfField = regexp.MustCompile(`name="csrf_token" value="([^"]+)"`)
 
 // expectSignInPageWith checks the answer sends the browser to the sign-in
 // page, and that the page shows the message.
