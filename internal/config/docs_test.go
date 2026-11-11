@@ -180,11 +180,7 @@ func loadEnvExample(text string) error {
 	return nil
 }
 
-var (
-	// The README's providers, in the order of its <PROVIDER>_… rows.
-	readmeProviders = []string{"GOOGLE", "GITHUB", "MICROSOFT", "LINKEDIN"}
-	backtickName    = regexp.MustCompile("`([A-Z<][A-Z0-9_<>]*)`")
-)
+var backtickName = regexp.MustCompile("`([A-Z<][A-Z0-9_<>]*)`")
 
 // readmeSettings lists the names in the first column of the table of every
 // setting under "## 3. Configuration". A <PROVIDER>_… row counts for each
@@ -216,8 +212,9 @@ func readmeSettings(t *testing.T, text string) []string {
 		for _, m := range backtickName.FindAllStringSubmatch(first, -1) {
 			name := m[1]
 			if rest, ok := strings.CutPrefix(name, "<PROVIDER>_"); ok {
-				for _, p := range readmeProviders {
-					names = append(names, p+"_"+rest)
+				// The same providers Load reads, so a new one needs no change here.
+				for _, p := range adminProviderNames {
+					names = append(names, strings.ToUpper(p)+"_"+rest)
 				}
 				continue
 			}
