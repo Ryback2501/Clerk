@@ -53,56 +53,26 @@ func run(logger *slog.Logger) error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	cfg, err := config.Load(os.Getenv)
-	if err != nil {
-		return fmt.Errorf("configuration: %w", err)
-	}
-
-	db, err := store.Open(cfg.DBPath)
-	if err != nil {
-		return fmt.Errorf("database: %w", err)
-	}
-	defer func() { _ = db.Close() }()
-
-	signer, err := keys.LoadOrGenerate(cfg.KeysPath)
-	if err != nil {
-		return fmt.Errorf("signing key: %w", err)
-	}
-	// The key id is safe to log; the key itself never is.
-	logger.Info("signing key ready", "kid", signer.KeyID(), "path", cfg.KeysPath)
-
-	provider, err := oidc.New(oidc.Options{
-		Issuer:         cfg.Issuer,
-		Signer:         signer,
-		Store:          db,
-		CodeTTL:        cfg.CodeTTL,
-		AccessTokenTTL: cfg.AccessTokenTTL,
-		IDTokenTTL:     cfg.IDTokenTTL,
-		Logger:         logger,
-	})
-	if err != nil {
-		return fmt.Errorf("oidc provider: %w", err)
-	}
-
-	adminHandler, err := buildAdmin(ctx, cfg, db, logger)
+	a, err := newApp(ctx, os.Getenv, logger)
 	if err != nil {
 		return err
 	}
+	defer func() { _ = a.Close() }()
 
 	srv := &http.Server{
-		Addr:              cfg.ListenAddr,
-		Handler:           newHandler(provider, adminHandler),
+		Addr:              a.cfg.ListenAddr,
+		Handler:           a.handler,
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 
 	// Expired authorization requests and codes are useless but not harmless:
 	// left alone they grow the database without bound. Reclaiming them is
 	// background work, so a failure is logged rather than fatal.
-	go purgeExpired(ctx, db, logger)
+	go purgeExpired(ctx, a.db, logger)
 
 	errCh := make(chan error, 1)
 	go func() {
-		logger.Info("listening", "addr", cfg.ListenAddr, "issuer", cfg.Issuer.String())
+		logger.Info("listening", "addr", a.cfg.ListenAddr, "issuer", a.cfg.Issuer.String())
 		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			errCh <- err
 		}
@@ -121,6 +91,67 @@ func run(logger *slog.Logger) error {
 		return fmt.Errorf("shutdown: %w", err)
 	}
 	return nil
+}
+
+// app is Clerk fully wired and ready to serve, but not yet listening.
+type app struct {
+	cfg     *config.Config
+	db      *store.Store
+	handler http.Handler
+}
+
+// newApp builds everything Clerk serves from its settings: configuration,
+// database, signing key, the OIDC provider and the admin interface. The
+// settings are a parameter rather than the process environment, so the whole
+// server can also be started inside a test.
+func newApp(ctx context.Context, getenv config.Getenv, logger *slog.Logger) (*app, error) {
+	cfg, err := config.Load(getenv)
+	if err != nil {
+		return nil, fmt.Errorf("configuration: %w", err)
+	}
+
+	db, err := store.Open(cfg.DBPath)
+	if err != nil {
+		return nil, fmt.Errorf("database: %w", err)
+	}
+	handler, err := wire(ctx, cfg, db, logger)
+	if err != nil {
+		_ = db.Close()
+		return nil, err
+	}
+	return &app{cfg: cfg, db: db, handler: handler}, nil
+}
+
+// Close releases the database.
+func (a *app) Close() error { return a.db.Close() }
+
+// wire builds the routes on top of an open database.
+func wire(ctx context.Context, cfg *config.Config, db *store.Store, logger *slog.Logger) (http.Handler, error) {
+	signer, err := keys.LoadOrGenerate(cfg.KeysPath)
+	if err != nil {
+		return nil, fmt.Errorf("signing key: %w", err)
+	}
+	// The key id is safe to log; the key itself never is.
+	logger.Info("signing key ready", "kid", signer.KeyID(), "path", cfg.KeysPath)
+
+	provider, err := oidc.New(oidc.Options{
+		Issuer:         cfg.Issuer,
+		Signer:         signer,
+		Store:          db,
+		CodeTTL:        cfg.CodeTTL,
+		AccessTokenTTL: cfg.AccessTokenTTL,
+		IDTokenTTL:     cfg.IDTokenTTL,
+		Logger:         logger,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("oidc provider: %w", err)
+	}
+
+	adminHandler, err := buildAdmin(ctx, cfg, db, logger)
+	if err != nil {
+		return nil, err
+	}
+	return newHandler(provider, adminHandler), nil
 }
 
 // buildAdmin wires the administration interface behind external sign-in and
