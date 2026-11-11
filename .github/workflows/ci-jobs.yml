@@ -68,31 +68,37 @@ jobs:
       - run: go test ./... -run Integration
 
   # Drives a real browser through the admin UI and the full authorization code
-  # flow against a running container.
+  # flow against a running container. The job starts its own Docker stack on the
+  # runner, so only the tests run in Playwright's image, which already has the
+  # browser and its system libraries: nothing is installed at run time (that
+  # download sometimes hangs). The image tag must equal @playwright/test in
+  # e2e/package-lock.json; the first step checks it.
   e2e:
     name: e2e
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v6
-      - uses: actions/setup-node@v6
-        with:
-          node-version: 22
-          cache: npm
-          cache-dependency-path: e2e/package-lock.json
+      - name: Playwright image matches the lock file
+        run: |
+          lock=$(grep -A1 '"node_modules/@playwright/test": {' e2e/package-lock.json | sed -n 's/.*"version": *"\([^"]*\)".*/\1/p' || true)
+          img=$(grep -o 'mcr\.microsoft\.com/playwright:v[0-9][0-9.]*[0-9]' .github/workflows/ci-jobs.yml | sed 's/.*:v//' | sort -u | tr '\n' ' ' | sed 's/ $//' || true)
+          [ -n "$lock" ] && [ "$img" = "$lock" ] || { echo "Playwright image v$img ≠ @playwright/test v$lock: change both together"; exit 1; }
       - name: Start the stack
         # Clerk built from this checkout, with administrators signed in through
         # a mock OIDC provider and authorized by a Bouncer stub.
         run: e2e/stack.sh up
-      - name: Install the suite
-        working-directory: e2e
-        run: npm ci
-      - name: Install the browser
-        working-directory: e2e
-        run: npx playwright install --with-deps chromium
+      # --ipc=host: Playwright's advice for Chromium. --user: test-results/ stays the runner's,
+      # so upload-artifact and cleanup work. HOME=/tmp: npm gets a writable cache.
+      # -e CI: the runner's CI=true does not reach the container by itself, and without it
+      # playwright.config.ts picks the html reporter, which waits for Ctrl+C after a failure.
       - name: Run
-        working-directory: e2e
-        run: npx playwright test
+        run: >
+          docker run --rm --network host --ipc=host
+          --user "$(id -u):$(id -g)" -e HOME=/tmp -e CI
+          -v "$PWD/e2e:/work" -w /work
+          mcr.microsoft.com/playwright:v1.63.0-noble
+          sh -c "npm ci && npx playwright test"
       - name: Stack logs
         if: failure()
         run: e2e/stack.sh logs
