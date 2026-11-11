@@ -8,6 +8,8 @@ import (
 	"strings"
 	"sync"
 	"testing"
+
+	"github.com/Ryback2501/Clerk/internal/standin"
 )
 
 // The log check: record everything Clerk logs, at every level and through
@@ -20,8 +22,8 @@ func TestFindSecretsNamesTheSecretAndTheLine(t *testing.T) {
 		"level=DEBUG msg=\"token issued\" token=eyJ.abc.def\n" +
 		"level=INFO msg=done\n"
 	leaks := findSecrets(logs, []namedSecret{
-		{"access token", "eyJ.abc.def"},
-		{"client secret", "never-logged"},
+		{Name: "access token", Value: "eyJ.abc.def"},
+		{Name: "client secret", Value: "never-logged"},
 	})
 	if len(leaks) != 1 {
 		t.Fatalf("got %d leaks, want 1: %+v", len(leaks), leaks)
@@ -34,7 +36,7 @@ func TestFindSecretsNamesTheSecretAndTheLine(t *testing.T) {
 // A secret too short to search for safely is a mistake in the test, not a
 // pass: an empty string is "found" everywhere, and a short one by chance.
 func TestFindSecretsRefusesAnUnusableSecret(t *testing.T) {
-	leaks := findSecrets("anything", []namedSecret{{"empty", ""}})
+	leaks := findSecrets("anything", []namedSecret{{Name: "empty", Value: ""}})
 	if len(leaks) != 1 || !strings.Contains(leaks[0].line, "too short") {
 		t.Errorf("an empty secret was not reported: %+v", leaks)
 	}
@@ -67,8 +69,9 @@ func TestCaptureLogsRecordsEveryLevelAndEveryLogger(t *testing.T) {
 }
 
 // namedSecret is a value that must never be logged, with the name a failure
-// reports it by.
-type namedSecret struct{ name, value string }
+// reports it by. It is the stand-in provider's type, so the secrets it records
+// need no conversion.
+type namedSecret = standin.Secret
 
 type leak struct{ name, line string }
 
@@ -80,13 +83,13 @@ const minSecretLength = 8
 func findSecrets(logs string, secrets []namedSecret) []leak {
 	var leaks []leak
 	for _, s := range secrets {
-		if len(s.value) < minSecretLength {
-			leaks = append(leaks, leak{s.name, fmt.Sprintf("(the value is too short to search for: %d characters)", len(s.value))})
+		if len(s.Value) < minSecretLength {
+			leaks = append(leaks, leak{s.Name, fmt.Sprintf("(the value is too short to search for: %d characters)", len(s.Value))})
 			continue
 		}
 		for _, line := range strings.Split(logs, "\n") {
-			if strings.Contains(line, s.value) {
-				leaks = append(leaks, leak{s.name, line})
+			if strings.Contains(line, s.Value) {
+				leaks = append(leaks, leak{s.Name, line})
 			}
 		}
 	}
