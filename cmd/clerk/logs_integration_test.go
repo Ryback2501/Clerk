@@ -32,35 +32,47 @@ func TestNoSecretInLogsIntegration(t *testing.T) {
 			secrets = append(secrets, namedSecret{name, value})
 		}
 	}
-	scan := func() {
+	// Every stack the test starts logs into the capture. Its signing key is
+	// read at once, while the key file exists; its provider's secrets are
+	// collected at the scan, so a sign-in made at any point is included.
+	var providers []*fakeProvider
+	start := func(t *testing.T, opts stackOptions) *stack {
+		t.Helper()
+		opts.Logger = logs.Logger
+		st := startStack(t, opts)
+		providers = append(providers, st.Provider)
+		for _, part := range signingKeySecrets(t, st.App.cfg.KeysPath) {
+			keep(part.name, part.value)
+		}
+		return st
+	}
+
+	// The scan runs however the test ends, after every stack has shut down: a
+	// test can stop exactly because something went wrong, and that is when a
+	// leak is most likely.
+	t.Cleanup(func() {
+		for _, p := range providers {
+			for _, secret := range p.Secrets() {
+				keep(secret.name, secret.value)
+			}
+		}
 		for _, leak := range findSecrets(logs.String(), secrets) {
 			t.Errorf("the %s appears in the logs: %s", leak.name, leak.line)
 		}
-	}
-	// step stops the test at the first failing step, as the later steps build
-	// on it, but still scans what was logged so far: a step can fail exactly
-	// because something went wrong, and that is when a leak is most likely.
+	})
+	// step stops the test at the first failing step: the later steps build
+	// on it.
 	step := func(name string, fn func(*testing.T)) {
 		if !t.Run(name, fn) {
-			scan()
 			t.FailNow()
 		}
 	}
 
-	s := startStack(t, stackOptions{Logger: logs.Logger})
 	keep("Bouncer API key", itBouncerAPIKey)
 	keep("sign-in provider client secret", itProviderSecret)
-	for _, part := range signingKeySecrets(t, s.App.cfg.KeysPath) {
-		keep(part.name, part.value)
-	}
+	s := start(t, stackOptions{})
 
 	step("admin session", func(t *testing.T) {
-		// The admin sign-in's own secrets, exchanged with the provider.
-		defer func() {
-			for _, secret := range s.Provider.Secrets() {
-				keep(secret.name, secret.value)
-			}
-		}()
 		if resp := s.adminSignIn(t); resp.StatusCode != http.StatusSeeOther {
 			t.Fatalf("admin sign-in answered %d: %s", resp.StatusCode, readBody(t, resp))
 		}
@@ -133,7 +145,7 @@ func TestNoSecretInLogsIntegration(t *testing.T) {
 	step("wrong Bouncer API key", func(t *testing.T) {
 		const wrongKey = "bncr_wrong-key-for-the-log-check"
 		keep("wrong Bouncer API key", wrongKey)
-		other := startStack(t, stackOptions{Logger: logs.Logger, BouncerAPIKey: wrongKey})
+		other := start(t, stackOptions{BouncerAPIKey: wrongKey})
 
 		resp := other.adminSignIn(t)
 		body := readBody(t, resp)
@@ -147,7 +159,7 @@ func TestNoSecretInLogsIntegration(t *testing.T) {
 	if !strings.Contains(recorded, "administrator signed in") {
 		t.Fatalf("the log capture recorded nothing from Clerk:\n%s", recorded)
 	}
-	scan()
+	// The scan itself runs in the cleanup registered above.
 }
 
 // signingKeySecrets returns the forms the signing key could leak in: each
