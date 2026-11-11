@@ -231,10 +231,16 @@ func newHandler(provider *oidc.Provider, adminHandler *admin.Handler) http.Handl
 	provider.Register(mux)
 	adminHandler.Register(mux)
 	web.Register(mux)
+	registerHealth(mux)
+	return mux
+}
+
+// registerHealth adds the liveness check the container healthcheck and
+// operators call.
+func registerHealth(mux web.Mux) {
 	mux.HandleFunc("GET /health", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte(`{"status":"ok"}`))
 	})
-	return mux
 }
