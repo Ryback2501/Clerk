@@ -1,0 +1,374 @@
+package main
+
+import (
+	"context"
+	"crypto/rand"
+	"crypto/rsa"
+	"encoding/json"
+	"io"
+	"log/slog"
+	"net/http"
+	"net/http/cookiejar"
+	"net/http/httptest"
+	"net/url"
+	"path/filepath"
+	"regexp"
+	"strings"
+	"sync"
+	"testing"
+	"time"
+
+	jose "github.com/go-jose/go-jose/v4"
+	"github.com/go-jose/go-jose/v4/jwt"
+)
+
+// The integration tests start the whole server the way main does — real
+// configuration parsing, a real database file, a real signing key, the real
+// routes — on a real local HTTP server. Only the outside world is replaced: the
+// admin sign-in provider and Bouncer are stand-ins started by the test, so no
+// network access or credentials are needed.
+//
+// The helpers here are meant to be reused by any test that needs a running
+// Clerk, not only by integration_test.go.
+
+const (
+	// The values the stand-ins and the configuration agree on.
+	itAdminSubject     = "integration-admin"
+	itBouncerAPIKey    = "bncr_integration-test-key"
+	itProviderClientID = "integration-google-client"
+	itProviderSecret   = "integration-google-secret"
+	itRedirectURI      = "https://client.example.com/callback"
+)
+
+// skipUnlessIntegration keeps the slow tests out of the fast run.
+func skipUnlessIntegration(t *testing.T) {
+	t.Helper()
+	if testing.Short() {
+		t.Skip("integration test: run with go test ./... -run Integration")
+	}
+}
+
+// stackOptions adjusts the stack a test starts.
+type stackOptions struct {
+	// Logger receives everything Clerk logs. Nil discards it.
+	Logger *slog.Logger
+	// BouncerAPIKey is the key Clerk is configured with. Empty means the key the
+	// stand-in Bouncer expects.
+	BouncerAPIKey string
+	// BouncerDown points Clerk at an address where nothing is listening.
+	BouncerDown bool
+}
+
+// stack is a running Clerk with its stand-ins.
+type stack struct {
+	// URL is Clerk's address, which is also its issuer.
+	URL      string
+	App      *app
+	Provider *fakeProvider
+	Bouncer  *fakeBouncer
+	// Client never follows redirects, so every step can be checked.
+	Client *http.Client
+}
+
+// startStack starts the stand-ins, then Clerk, and stops them all at the end
+// of the test.
+func startStack(t *testing.T, opts stackOptions) *stack {
+	t.Helper()
+
+	provider := newFakeProvider(t)
+	bouncer := newFakeBouncer(t)
+	bouncerURL := bouncer.URL
+	if opts.BouncerDown {
+		bouncer.Stop()
+	}
+	apiKey := opts.BouncerAPIKey
+	if apiKey == "" {
+		apiKey = itBouncerAPIKey
+	}
+	logger := opts.Logger
+	if logger == nil {
+		logger = slog.New(slog.NewTextHandler(io.Discard, nil))
+	}
+
+	// The listener exists before Clerk is built, so the issuer can name it.
+	srv := httptest.NewUnstartedServer(nil)
+	clerkURL := "http://" + srv.Listener.Addr().String()
+
+	dir := t.TempDir()
+	env := map[string]string{
+		"ISSUER":               clerkURL,
+		"DB_PATH":              filepath.Join(dir, "clerk.db"),
+		"KEYS_PATH":            filepath.Join(dir, "signing.pem"),
+		"BOUNCER_URL":          bouncerURL,
+		"BOUNCER_API_KEY":      apiKey,
+		"GOOGLE_CLIENT_ID":     itProviderClientID,
+		"GOOGLE_CLIENT_SECRET": itProviderSecret,
+		"GOOGLE_ISSUER":        provider.URL,
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	a, err := newApp(ctx, func(key string) string { return env[key] }, logger)
+	if err != nil {
+		cancel()
+		srv.Close()
+		t.Fatalf("start clerk: %v", err)
+	}
+	srv.Config.Handler = a.handler
+	srv.Start()
+	t.Cleanup(func() {
+		srv.Close()
+		cancel()
+		_ = a.Close()
+	})
+
+	jar, err := cookiejar.New(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return &stack{
+		URL:      clerkURL,
+		App:      a,
+		Provider: provider,
+		Bouncer:  bouncer,
+		Client: &http.Client{
+			Jar:     jar,
+			Timeout: 10 * time.Second,
+			CheckRedirect: func(*http.Request, []*http.Request) error {
+				return http.ErrUseLastResponse
+			},
+		},
+	}
+}
+
+// testClient is a registered application with one test user.
+type testClient struct {
+	ClientID    string
+	Secret      string
+	RedirectURI string
+	UserID      int64
+	UserSub     string
+}
+
+// seedClient registers an application and a test user directly in the
+// database. The admin interface is not involved, so this works whether or not
+// Bouncer is reachable.
+func (s *stack) seedClient(t *testing.T) testClient {
+	t.Helper()
+	ctx := context.Background()
+	application, secret, err := s.App.db.CreateApplication(ctx, "Integration "+t.Name(), []string{itRedirectURI})
+	if err != nil {
+		t.Fatalf("create application: %v", err)
+	}
+	user, err := s.App.db.CreateUser(ctx, application.ID, "Jane Tester")
+	if err != nil {
+		t.Fatalf("create user: %v", err)
+	}
+	return testClient{
+		ClientID:    application.ClientID,
+		Secret:      secret,
+		RedirectURI: itRedirectURI,
+		UserID:      user.ID,
+		UserSub:     user.Sub,
+	}
+}
+
+// get and postForm are the client's requests, failing the test on a transport
+// error.
+func (s *stack) get(t *testing.T, target string, header http.Header) *http.Response {
+	t.Helper()
+	req, err := http.NewRequest(http.MethodGet, target, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for k, v := range header {
+		req.Header[k] = v
+	}
+	resp, err := s.Client.Do(req)
+	if err != nil {
+		t.Fatalf("GET %s: %v", target, err)
+	}
+	return resp
+}
+
+func (s *stack) postForm(t *testing.T, target string, form url.Values, header http.Header) *http.Response {
+	t.Helper()
+	req, err := http.NewRequest(http.MethodPost, target, strings.NewReader(form.Encode()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	for k, v := range header {
+		req.Header[k] = v
+	}
+	resp, err := s.Client.Do(req)
+	if err != nil {
+		t.Fatalf("POST %s: %v", target, err)
+	}
+	return resp
+}
+
+// readBody returns the body and closes it.
+func readBody(t *testing.T, resp *http.Response) string {
+	t.Helper()
+	defer func() { _ = resp.Body.Close() }()
+	b, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(b)
+}
+
+// hiddenField finds a hidden form field's value in a rendered page.
+func hiddenField(t *testing.T, page, name string) string {
+	t.Helper()
+	re := regexp.MustCompile(`name="` + regexp.QuoteMeta(name) + `" value="([^"]*)"`)
+	m := re.FindStringSubmatch(page)
+	if m == nil {
+		t.Fatalf("the page has no %q field:\n%s", name, page)
+	}
+	return m[1]
+}
+
+// fakeProvider is a stand-in OpenID Connect sign-in provider for the admin
+// interface. Its authorization step signs the stand-in administrator in at
+// once and sends the browser straight back with a code.
+type fakeProvider struct {
+	URL    string
+	server *httptest.Server
+	key    *rsa.PrivateKey
+
+	mu     sync.Mutex
+	nonces map[string]string // code → the nonce of the request that issued it
+}
+
+func newFakeProvider(t *testing.T) *fakeProvider {
+	t.Helper()
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := &fakeProvider{key: key, nonces: map[string]string{}}
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /.well-known/openid-configuration", func(w http.ResponseWriter, _ *http.Request) {
+		writeJSON(w, http.StatusOK, map[string]any{
+			"issuer":                                p.URL,
+			"authorization_endpoint":                p.URL + "/auth",
+			"token_endpoint":                        p.URL + "/token",
+			"jwks_uri":                              p.URL + "/jwks",
+			"response_types_supported":              []string{"code"},
+			"subject_types_supported":               []string{"public"},
+			"id_token_signing_alg_values_supported": []string{"RS256"},
+		})
+	})
+	mux.HandleFunc("GET /jwks", func(w http.ResponseWriter, _ *http.Request) {
+		writeJSON(w, http.StatusOK, jose.JSONWebKeySet{Keys: []jose.JSONWebKey{{
+			Key: key.Public(), KeyID: "integration", Algorithm: "RS256", Use: "sig",
+		}}})
+	})
+	mux.HandleFunc("GET /auth", func(w http.ResponseWriter, r *http.Request) {
+		q := r.URL.Query()
+		back, err := url.Parse(q.Get("redirect_uri"))
+		if err != nil || q.Get("client_id") != itProviderClientID {
+			http.Error(w, "bad authorization request", http.StatusBadRequest)
+			return
+		}
+		code := "code-" + q.Get("state")
+		p.mu.Lock()
+		p.nonces[code] = q.Get("nonce")
+		p.mu.Unlock()
+
+		v := back.Query()
+		v.Set("code", code)
+		v.Set("state", q.Get("state"))
+		back.RawQuery = v.Encode()
+		http.Redirect(w, r, back.String(), http.StatusFound)
+	})
+	mux.HandleFunc("POST /token", func(w http.ResponseWriter, r *http.Request) {
+		_ = r.ParseForm()
+		p.mu.Lock()
+		nonce, ok := p.nonces[r.PostFormValue("code")]
+		delete(p.nonces, r.PostFormValue("code"))
+		p.mu.Unlock()
+		if !ok || r.PostFormValue("code_verifier") == "" {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid_grant"})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{
+			"access_token": "provider-access-token",
+			"token_type":   "Bearer",
+			"expires_in":   3600,
+			"id_token":     p.idToken(t, nonce),
+		})
+	})
+
+	p.server = httptest.NewServer(mux)
+	p.URL = p.server.URL
+	t.Cleanup(p.server.Close)
+	return p
+}
+
+func (p *fakeProvider) idToken(t *testing.T, nonce string) string {
+	signer, err := jose.NewSigner(
+		jose.SigningKey{Algorithm: jose.RS256, Key: p.key},
+		(&jose.SignerOptions{}).WithType("JWT").WithHeader("kid", "integration"))
+	if err != nil {
+		t.Error(err)
+		return ""
+	}
+	out, err := jwt.Signed(signer).Claims(map[string]any{
+		"iss":   p.URL,
+		"aud":   itProviderClientID,
+		"sub":   itAdminSubject,
+		"name":  "Integration Admin",
+		"nonce": nonce,
+		"iat":   time.Now().Unix(),
+		"exp":   time.Now().Add(time.Hour).Unix(),
+	}).Serialize()
+	if err != nil {
+		t.Error(err)
+	}
+	return out
+}
+
+// fakeBouncer is a stand-in for Bouncer's access endpoint. It grants the
+// admin role to the stand-in administrator, only when Clerk presents the
+// expected API key, and refuses everything else the way Bouncer does.
+type fakeBouncer struct {
+	URL    string
+	server *httptest.Server
+}
+
+func newFakeBouncer(t *testing.T) *fakeBouncer {
+	t.Helper()
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /api/v1/access", func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "Bearer "+itBouncerAPIKey {
+			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "invalid_api_key"})
+			return
+		}
+		q := r.URL.Query()
+		if q.Get("sub") != itAdminSubject || q.Get("provider") != "google" {
+			writeJSON(w, http.StatusNotFound, map[string]string{"error": "user_not_found"})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{
+			"sub":  itAdminSubject,
+			"role": map[string]string{"customId": "admin", "name": "Administrator"},
+		})
+	})
+	b := &fakeBouncer{server: httptest.NewServer(mux)}
+	b.URL = b.server.URL
+	t.Cleanup(b.server.Close)
+	return b
+}
+
+// Stop makes Bouncer unreachable: its address stays configured in Clerk, but
+// nothing listens there any more.
+func (b *fakeBouncer) Stop() { b.server.Close() }
+
+func writeJSON(w http.ResponseWriter, status int, v any) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(v)
+}
