@@ -152,12 +152,34 @@ func TestProviderRefusalLandsOnSignInWithTheRefusedMessage(t *testing.T) {
 }
 
 func TestFailedSignInLandsOnSignInWithTheFailedMessage(t *testing.T) {
-	site := newSignInSite(t)
-	resp := site.get(t, "/admin/auth/google/callback?code=some-code&state=not-a-real-state")
-	readAll(t, resp)
+	for _, tc := range []struct {
+		name     string
+		callback func(t *testing.T, site *signInSite) string
+	}{
+		{"a state Clerk never issued", func(*testing.T, *signInSite) string {
+			return "/admin/auth/google/callback?code=some-code&state=not-a-real-state"
+		}},
+		{"a code the provider refuses", func(t *testing.T, site *signInSite) string {
+			// A real sign-in with the real state, but a code the provider
+			// never issued, so the exchange fails.
+			callback, err := url.Parse(site.reachCallback(t))
+			if err != nil {
+				t.Fatal(err)
+			}
+			q := callback.Query()
+			q.Set("code", "not-a-code-the-provider-issued")
+			return callback.Path + "?" + q.Encode()
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			site := newSignInSite(t)
+			resp := site.get(t, tc.callback(t, site))
+			readAll(t, resp)
 
-	site.expectSignInPageWith(t, resp, "The sign-in could not be completed. Please try again.")
-	site.expectNoSession(t, resp)
+			site.expectSignInPageWith(t, resp, "The sign-in could not be completed. Please try again.")
+			site.expectNoSession(t, resp)
+		})
+	}
 }
 
 func TestBouncerRefusalIsNotAuthorizedWithoutASession(t *testing.T) {
