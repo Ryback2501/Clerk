@@ -43,13 +43,13 @@ func (s *stack) newFlow(t *testing.T) *oidcFlow {
 	}
 }
 
-// run performs every step in order, stopping at the first failure.
+// run performs every step in order, each as a sub-test named after it, and
+// stops at the first one that fails.
 func (f *oidcFlow) run(t *testing.T) {
 	t.Helper()
 	for _, step := range f.steps() {
-		step.fn(t)
-		if t.Failed() {
-			t.Fatalf("the sign-in flow failed at the %s step", step.name)
+		if !t.Run(step.name, step.fn) {
+			t.Fatalf("stopped: the %s step failed", step.name)
 		}
 	}
 }

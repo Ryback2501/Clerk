@@ -12,13 +12,7 @@ import (
 func TestSignInFlowIntegration(t *testing.T) {
 	skipUnlessIntegration(t)
 	s := startStack(t, stackOptions{})
-	flow := s.newFlow(t)
-
-	for _, step := range flow.steps() {
-		if !t.Run(step.name, step.fn) {
-			t.Fatalf("stopped: the %s step failed", step.name)
-		}
-	}
+	s.newFlow(t).run(t)
 }
 
 // The stand-ins work: with Bouncer reachable, the stand-in administrator signs
