@@ -24,13 +24,21 @@ const StylesheetFile = "pico.min.css"
 // Stylesheet is the stylesheet's URL under the default prefix.
 const Stylesheet = StaticPath + StylesheetFile
 
+// Mux is the part of *http.ServeMux that registers routes. Taking it rather
+// than the concrete router lets a test record exactly which routes the code
+// registers.
+type Mux interface {
+	Handle(pattern string, handler http.Handler)
+	HandleFunc(pattern string, handler func(http.ResponseWriter, *http.Request))
+}
+
 // Register mounts the static assets at the default prefix.
-func Register(mux *http.ServeMux) { RegisterAt(mux, StaticPath) }
+func Register(mux Mux) { RegisterAt(mux, StaticPath) }
 
 // RegisterAt mounts the static assets at prefix, which must begin and end with
 // a slash. The OIDC endpoints serve them under the issuer's path as well, so a
 // proxy forwarding only that prefix still reaches them.
-func RegisterAt(mux *http.ServeMux, prefix string) {
+func RegisterAt(mux Mux, prefix string) {
 	sub, err := fs.Sub(staticFS, "static")
 	if err != nil {
 		// The tree is embedded at build time, so this cannot fail in a built

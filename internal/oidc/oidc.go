@@ -260,7 +260,7 @@ func (p *Provider) refuseStatus(w http.ResponseWriter, r *http.Request, status i
 // otherwise every client that follows discovery gets a 404 on JWKS and can
 // never verify an ID token. Deployments behind a proxy must therefore forward
 // the full path rather than stripping the prefix.
-func (p *Provider) Register(mux *http.ServeMux) {
+func (p *Provider) Register(mux web.Mux) {
 	mux.HandleFunc("GET "+p.path(DiscoveryPath), p.handleDiscovery)
 	mux.HandleFunc("GET "+p.path(JWKSPath), p.handleJWKS)
 	mux.HandleFunc("GET "+p.path(AuthorizePath), p.handleAuthorize)
